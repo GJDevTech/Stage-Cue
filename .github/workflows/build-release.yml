@@ -24,9 +24,10 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller==6.16.0
       - name: Configure release repository
-        shell: pwsh
+        env:
+          STAGE_CUE_REPOSITORY: ${{ github.repository }}
         run: |
-          python -c "from pathlib import Path; p=Path('services/release_config.py'); s=p.read_text(); p.write_text(s.replace('GITHUB_REPOSITORY = \"\"', 'GITHUB_REPOSITORY = \"${{ github.repository }}\"'))"
+          python packaging/stamp_release_config.py
       - name: Build Windows app
         shell: pwsh
         run: |
@@ -67,8 +68,10 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller==6.16.0
       - name: Configure release repository
+        env:
+          STAGE_CUE_REPOSITORY: ${{ github.repository }}
         run: |
-          python -c "from pathlib import Path; p=Path('services/release_config.py'); s=p.read_text(); p.write_text(s.replace('GITHUB_REPOSITORY = \"\"', 'GITHUB_REPOSITORY = \"${{ github.repository }}\"'))"
+          python packaging/stamp_release_config.py
       - name: Build Linux AppImage
         run: |
           pyinstaller \
@@ -127,8 +130,10 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller==6.16.0
       - name: Configure release repository
+        env:
+          STAGE_CUE_REPOSITORY: ${{ github.repository }}
         run: |
-          python -c "from pathlib import Path; p=Path('services/release_config.py'); s=p.read_text(); p.write_text(s.replace('GITHUB_REPOSITORY = \"\"', 'GITHUB_REPOSITORY = \"${{ github.repository }}\"'))"
+          python packaging/stamp_release_config.py
       - name: Build macOS app
         run: |
           pyinstaller \
