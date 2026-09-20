@@ -36,6 +36,7 @@ jobs:
             --onefile `
             --windowed `
             --name "Stage Cue" `
+            --icon "assets/stagecue.png" `
             --hidden-import "PIL" `
             --hidden-import "PIL._imagingtk" `
             --hidden-import "PIL._tkinter_finder" `
@@ -76,6 +77,7 @@ jobs:
             --onedir \
             --windowed \
             --name "Stage Cue" \
+            --icon "assets/stagecue.png" \
             --hidden-import "PIL" \
             --hidden-import "PIL._imagingtk" \
             --hidden-import "PIL._tkinter_finder" \
@@ -85,11 +87,11 @@ jobs:
 
           mkdir -p "Stage Cue.AppDir/usr/bin"
           cp -a "dist/Stage Cue/." "Stage Cue.AppDir/usr/bin/"
-          cp assets/stage-cue.svg "Stage Cue.AppDir/stage-cue.svg"
+          cp assets/stagecue.png "Stage Cue.AppDir/stagecue.png"
           cp packaging/linux/stage-cue.desktop "Stage Cue.AppDir/stage-cue.desktop"
           cp packaging/linux/AppRun "Stage Cue.AppDir/AppRun"
           chmod +x "Stage Cue.AppDir/AppRun"
-          ln -s stage-cue.svg "Stage Cue.AppDir/.DirIcon"
+          ln -s stagecue.png "Stage Cue.AppDir/.DirIcon"
 
           curl -L --fail --retry 3 \
             -o appimagetool \
@@ -136,6 +138,7 @@ jobs:
             --windowed \
             --name "Stage Cue" \
             --osx-bundle-identifier "tech.gjdev.stagecue" \
+            --icon "assets/stagecue.png" \
             --hidden-import "PIL" \
             --hidden-import "PIL._imagingtk" \
             --hidden-import "PIL._tkinter_finder" \
