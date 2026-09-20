@@ -36,10 +36,15 @@ class PresentationCanvasRenderer:
         self._video_capture = None
         self._video_job = None
         self._video_delay_ms = 33
+        self._resize_job = None
+        self._layout_key = None
+        self._font_cache: dict[tuple, tkfont.Font] = {}
+        self._logo_photo_key = None
         canvas.bind("<Configure>", self.resize, add="+")
 
     def render(self, state: dict[str, Any]) -> None:
         self.state = state
+        self._layout_key = None
         settings = state.get("settings", {})
         blackout = state.get("mode") == "BLACKOUT"
         self.canvas.configure(
@@ -81,14 +86,65 @@ class PresentationCanvasRenderer:
         self.resize()
 
     def resize(self, _event=None) -> None:
+        # Linux window managers can emit dozens of Configure events for one
+        # resize. Coalesce them so expensive font fitting and image scaling run
+        # only once after Tk finishes the current geometry pass.
+        if _event is not None:
+            if self._resize_job is not None:
+                try:
+                    self.canvas.after_cancel(self._resize_job)
+                except tk.TclError:
+                    pass
+            try:
+                self._resize_job = self.canvas.after_idle(self._resize_now)
+            except tk.TclError:
+                self._resize_job = None
+            return
+        if self._resize_job is not None:
+            try:
+                self.canvas.after_cancel(self._resize_job)
+            except tk.TclError:
+                pass
+            self._resize_job = None
+        self._resize_now()
+
+    def _resize_now(self) -> None:
+        self._resize_job = None
         if not self.state:
             return
         width = max(100, self.canvas.winfo_width())
         height = max(100, self.canvas.winfo_height())
         settings = self.state.get("settings", {})
+        text = str(self.canvas.itemcget(self.text_id, "text"))
+        layout_key = (
+            width,
+            height,
+            text,
+            settings.get("fontFamily", "Arial"),
+            settings.get("fontSize", 54),
+            bool(settings.get("bold")),
+            bool(settings.get("italic")),
+            settings.get("textBoxX", 5),
+            settings.get("textBoxY", 25),
+            settings.get("textBoxWidth", 90),
+            settings.get("textBoxHeight", 50),
+            settings.get("textHorizontalAlign", "center"),
+            settings.get("textVerticalAlign", "center"),
+            settings.get("outlineWidth", 0),
+            settings.get("shadowOffsetX", 0),
+            settings.get("shadowOffsetY", 0),
+            bool(self.state.get("logoVisible")),
+            self._logo_source,
+            settings.get("logoX", 5),
+            settings.get("logoY", 5),
+            settings.get("logoWidth", 20),
+        )
+        if layout_key == self._layout_key:
+            self._resize_background(width, height, settings)
+            return
+        self._layout_key = layout_key
         layout = calculate_text_box_layout(width, height, settings)
         self._resize_background(width, height, settings)
-        text = str(self.canvas.itemcget(self.text_id, "text"))
         scale = min(width / 1920, height / 1080)
         requested_size = max(8, round(int(settings.get("fontSize", 54)) * scale))
         fitted_font = self._fit_font(
@@ -151,7 +207,10 @@ class PresentationCanvasRenderer:
             if capture.isOpened():
                 self._video_capture = capture
                 fps = float(capture.get(cv2.CAP_PROP_FPS) or 30)
-                self._video_delay_ms = max(15, min(100, round(1000 / max(1, fps))))
+                # Tk/Pillow rendering is CPU-bound on Linux. A 24 fps ceiling
+                # keeps motion smooth while leaving the event loop responsive.
+                effective_fps = min(24.0, max(1.0, fps))
+                self._video_delay_ms = max(42, min(100, round(1000 / effective_fps)))
                 self._video_tick()
             else:
                 capture.release()
@@ -164,6 +223,15 @@ class PresentationCanvasRenderer:
             self._video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ok, frame = self._video_capture.read()
         if ok:
+            source_height, source_width = frame.shape[:2]
+            render_width = max(640, int(self.canvas.winfo_width()))
+            if source_width > render_width:
+                ratio = render_width / source_width
+                frame = cv2.resize(
+                    frame,
+                    (render_width, max(1, round(source_height * ratio))),
+                    interpolation=cv2.INTER_AREA,
+                )
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             self._background_image = Image.fromarray(frame)
             self._background_photo_key = None
@@ -229,8 +297,19 @@ class PresentationCanvasRenderer:
         )
         self.canvas.tag_lower(self.background_id)
 
-    @staticmethod
-    def _fit_font(text, family, requested_size, box_width, box_height, bold, italic):
+    def _fit_font(self, text, family, requested_size, box_width, box_height, bold, italic):
+        cache_key = (
+            text,
+            family,
+            requested_size,
+            round(box_width),
+            round(box_height),
+            bold,
+            italic,
+        )
+        cached = self._font_cache.get(cache_key)
+        if cached is not None:
+            return cached
         lines = text.splitlines() or [""]
         low, high, best = 1, max(1, requested_size), 1
         while low <= high:
@@ -248,18 +327,23 @@ class PresentationCanvasRenderer:
                 low = size + 1
             else:
                 high = size - 1
-        return tkfont.Font(
+        fitted = tkfont.Font(
             family=family,
             size=best,
             weight="bold" if bold else "normal",
             slant="italic" if italic else "roman",
         )
+        if len(self._font_cache) >= 128:
+            self._font_cache.clear()
+        self._font_cache[cache_key] = fitted
+        return fitted
 
     def _load_logo(self, data_url: str) -> None:
         if data_url == self._logo_source:
             return
         self._logo_source = data_url
         self._logo_photo = None
+        self._logo_photo_key = None
         self._logo_image = None
         if not data_url or "," not in data_url:
             return
@@ -286,8 +370,19 @@ class PresentationCanvasRenderer:
         if target_height > max_height:
             target_height = max_height
             target_width = max(1, round(target_height / ratio))
+        photo_key = (self._logo_source, target_width, target_height)
+        if self._logo_photo is not None and self._logo_photo_key == photo_key:
+            self.canvas.coords(
+                self.logo_id,
+                canvas_width * int(settings.get("logoX", 5)) / 100,
+                canvas_height * int(settings.get("logoY", 5)) / 100,
+            )
+            self.canvas.itemconfigure(self.logo_id, image=self._logo_photo, state="normal")
+            self.canvas.tag_raise(self.logo_id)
+            return
         image = self._logo_image.resize((target_width, target_height), Image.Resampling.LANCZOS)
         self._logo_photo = ImageTk.PhotoImage(image)
+        self._logo_photo_key = photo_key
         self.canvas.coords(
             self.logo_id,
             canvas_width * int(settings.get("logoX", 5)) / 100,

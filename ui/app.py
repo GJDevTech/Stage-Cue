@@ -609,6 +609,18 @@ class App(tk.Tk):
             self.presentation_window = PresentationWindow(self)
         self.presentation_window.present(live_view_cue)
 
+    def close_live_view(self) -> None:
+        """Close the secondary presentation window and discard its last cue."""
+
+        window = self.presentation_window
+        self.presentation_window = None
+        if window is None:
+            return
+        try:
+            window.destroy()
+        except tk.TclError:
+            pass
+
     def publish_stage_cue(self, stage_view_cue: dict[str, Any]) -> None:
         if self.current_session:
             self.stage_publisher.publish(
@@ -693,6 +705,5 @@ class App(tk.Tk):
         self.current_session = None
         self.current_account = None
         self.pending_profile = None
-        if self.presentation_window is not None:
-            self.presentation_window.withdraw()
+        self.close_live_view()
         self.show_page("AuthPage")

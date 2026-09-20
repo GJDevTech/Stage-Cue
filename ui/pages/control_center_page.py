@@ -2184,6 +2184,9 @@ class ControlCenterPage(tk.Frame):
     def _on_slide_selected(self, _event=None):
         selection = self.slide_list.curselection()
         if selection and selection[0] < len(self.slides):
+            if _event is not None and self.text_hidden:
+                self.text_hidden = False
+                self._update_live_control_buttons()
             slide = self.slides[selection[0]]
             self.preview_slide = slide
             self.preview_caption_var.set(f"Selected: {slide.label}")
@@ -2208,11 +2211,18 @@ class ControlCenterPage(tk.Frame):
         if self.presentation_active:
             self.presentation_active = False
             self.output_frozen = False
+            self.text_hidden = False
+            self.live_mode = "READY"
+            self.controller.close_live_view()
+            self.stage_mode = "CLEAR"
+            self.stage_message = ""
+            self._update_stage_state()
+            self._publish_stage_view()
             self._update_present_controls()
             self._update_live_control_buttons()
             self._draw_preview()
             self.set_status(
-                "Present mode is off. Live View and Stage View hold their last cues."
+                "Present mode is off. Live View closed and Stage View cleared."
             )
             return
         selection = self.slide_list.curselection()
@@ -2238,6 +2248,12 @@ class ControlCenterPage(tk.Frame):
         selection = self.slide_list.curselection()
         if not selection or selection[0] >= len(self.slides):
             return
+        # Hide Text is a temporary pause between cues. Advancing to any slide
+        # resumes the lyrics automatically so the operator cannot accidentally
+        # leave the audience looking at a blank Live View.
+        if self.text_hidden:
+            self.text_hidden = False
+            self._update_live_control_buttons()
         slide = self.slides[selection[0]]
         live_title = self._current_content_title()
         self.live_slide = slide
@@ -2627,8 +2643,11 @@ class ControlCenterPage(tk.Frame):
         else:
             canvas_width = available_width
             canvas_height = round(canvas_width / aspect)
-        self.preview_canvas.configure(width=canvas_width, height=canvas_height)
-        self.preview_renderer.resize()
+        if (
+            int(float(self.preview_canvas.cget("width"))) != canvas_width
+            or int(float(self.preview_canvas.cget("height"))) != canvas_height
+        ):
+            self.preview_canvas.configure(width=canvas_width, height=canvas_height)
 
     def _upcoming_slides_after_live(self, count):
         if self.live_slide is None:

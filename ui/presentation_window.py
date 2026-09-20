@@ -59,8 +59,11 @@ class PresentationWindow(tk.Toplevel):
         else:
             width = available_width
             height = round(width * 9 / 16)
-        self.canvas.configure(width=width, height=height)
-        self.renderer.resize()
+        if (
+            int(float(self.canvas.cget("width"))) != width
+            or int(float(self.canvas.cget("height"))) != height
+        ):
+            self.canvas.configure(width=width, height=height)
 
     def present(self, cue):
         if not self._opened or not self.winfo_viewable():
