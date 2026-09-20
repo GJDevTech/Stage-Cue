@@ -180,16 +180,44 @@ def _windows_install(download: Path) -> None:
         raise UpdateError("Updates can only be installed by a packaged Stage Cue app.")
     if not os.access(target.parent, os.W_OK):
         raise UpdateError("Stage Cue is in a read-only folder. Move it to a folder you can edit, then try again.")
+    parent_pid = os.getppid()
+    staged = target.with_name(f"{target.name}.update")
+    backup = target.with_name(f"{target.name}.old")
+    image_name = target.name
     script = download.parent / "update-stage-cue.cmd"
     content = (
         "@echo off\r\n"
-        "setlocal\r\n"
-        f":wait\r\ntasklist /FI \"PID eq {os.getpid()}\" | find \"{os.getpid()}\" >nul\r\n"
-        "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)\r\n"
-        f"move /Y \"{download}\" \"{target}\" >nul\r\n"
-        "if errorlevel 1 (start \"\" cmd /c \"echo Stage Cue could not replace its app file. & pause\" & exit /b 1)\r\n"
-        f"start \"\" \"{target}\"\r\n"
+        "setlocal EnableExtensions\r\n"
+        f"copy /B /Y \"{download}\" \"{staged}\" >nul\r\n"
+        "if errorlevel 1 goto install_error\r\n"
+        f":wait_app\r\ntasklist /FI \"PID eq {os.getpid()}\" /NH | find \"{os.getpid()}\" >nul\r\n"
+        "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait_app)\r\n"
+        # A PyInstaller one-file app has a parent bootloader process which can
+        # outlive Python briefly while it removes the extracted runtime.
+        f":wait_bootloader\r\ntasklist /FI \"PID eq {parent_pid}\" /NH | find \"{parent_pid}\" >nul\r\n"
+        "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait_bootloader)\r\n"
+        "timeout /t 2 /nobreak >nul\r\n"
+        f"del /Q \"{backup}\" >nul 2>&1\r\n"
+        f"move /Y \"{target}\" \"{backup}\" >nul\r\n"
+        "if errorlevel 1 goto install_error\r\n"
+        f"move /Y \"{staged}\" \"{target}\" >nul\r\n"
+        "if errorlevel 1 goto restore_old\r\n"
+        f"start \"\" /D \"{target.parent}\" \"{target}\"\r\n"
+        "timeout /t 5 /nobreak >nul\r\n"
+        f"tasklist /FI \"IMAGENAME eq {image_name}\" /NH | find /I \"{image_name}\" >nul\r\n"
+        "if errorlevel 1 goto restore_old\r\n"
+        f"del /Q \"{backup}\" >nul 2>&1\r\n"
         "del \"%~f0\"\r\n"
+        "exit /b 0\r\n"
+        ":restore_old\r\n"
+        f"del /Q \"{target}\" >nul 2>&1\r\n"
+        f"move /Y \"{backup}\" \"{target}\" >nul\r\n"
+        f"start \"\" /D \"{target.parent}\" \"{target}\"\r\n"
+        "goto install_error\r\n"
+        ":install_error\r\n"
+        "start \"\" cmd /c \"echo Stage Cue could not finish the update. The previous version was restored when possible. ^& pause\"\r\n"
+        "del \"%~f0\"\r\n"
+        "exit /b 1\r\n"
     )
     script.write_text(content, encoding="utf-8", newline="")
     subprocess.Popen(["cmd", "/c", "start", "", "/min", str(script)], close_fds=True)
