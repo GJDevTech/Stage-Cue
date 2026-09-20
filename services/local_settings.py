@@ -28,6 +28,8 @@ DEFAULTS: dict[str, Any] = {
     "ui_scale": "auto",
     "remember_window_geometry": True,
     "window_geometry": "",
+    "automatically_check_for_updates": True,
+    "skipped_update_version": "",
 }
 
 
@@ -138,3 +140,19 @@ class LocalSettings:
     @window_geometry.setter
     def window_geometry(self, value: str) -> None:
         self.set("window_geometry", str(value or ""))
+
+    @property
+    def automatically_check_for_updates(self) -> bool:
+        return bool(self._values.get("automatically_check_for_updates", True))
+
+    @automatically_check_for_updates.setter
+    def automatically_check_for_updates(self, value: bool) -> None:
+        self.set("automatically_check_for_updates", bool(value))
+
+    @property
+    def skipped_update_version(self) -> str:
+        return str(self._values.get("skipped_update_version", "") or "")
+
+    @skipped_update_version.setter
+    def skipped_update_version(self, value: str) -> None:
+        self.set("skipped_update_version", str(value or ""))

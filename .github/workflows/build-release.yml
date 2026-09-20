@@ -1,0 +1,187 @@
+name: Build Stage Cue
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.16.0
+      - name: Configure release repository
+        shell: pwsh
+        run: |
+          python -c "from pathlib import Path; p=Path('services/release_config.py'); s=p.read_text(); p.write_text(s.replace('GITHUB_REPOSITORY = \"\"', 'GITHUB_REPOSITORY = \"${{ github.repository }}\"'))"
+      - name: Build Windows app
+        shell: pwsh
+        run: |
+          pyinstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --windowed `
+            --name "Stage Cue" `
+            --hidden-import "PIL" `
+            --hidden-import "PIL._imagingtk" `
+            --hidden-import "PIL._tkinter_finder" `
+            --add-data "client_secret.json:." `
+            --add-data "assets:assets" `
+            main.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: stage-cue-windows
+          path: dist/Stage Cue.exe
+          if-no-files-found: error
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install GUI and AppImage dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk libfuse2
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.16.0
+      - name: Configure release repository
+        run: |
+          python -c "from pathlib import Path; p=Path('services/release_config.py'); s=p.read_text(); p.write_text(s.replace('GITHUB_REPOSITORY = \"\"', 'GITHUB_REPOSITORY = \"${{ github.repository }}\"'))"
+      - name: Build Linux AppImage
+        run: |
+          pyinstaller \
+            --noconfirm \
+            --clean \
+            --onedir \
+            --windowed \
+            --name "Stage Cue" \
+            --hidden-import "PIL" \
+            --hidden-import "PIL._imagingtk" \
+            --hidden-import "PIL._tkinter_finder" \
+            --add-data "client_secret.json:." \
+            --add-data "assets:assets" \
+            main.py
+
+          mkdir -p "Stage Cue.AppDir/usr/bin"
+          cp -a "dist/Stage Cue/." "Stage Cue.AppDir/usr/bin/"
+          cp assets/stage-cue.svg "Stage Cue.AppDir/stage-cue.svg"
+          cp packaging/linux/stage-cue.desktop "Stage Cue.AppDir/stage-cue.desktop"
+          cp packaging/linux/AppRun "Stage Cue.AppDir/AppRun"
+          chmod +x "Stage Cue.AppDir/AppRun"
+          ln -s stage-cue.svg "Stage Cue.AppDir/.DirIcon"
+
+          curl -L --fail --retry 3 \
+            -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run "Stage Cue.AppDir" "Stage Cue.AppImage"
+          chmod +x "Stage Cue.AppImage"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: stage-cue-linux
+          path: Stage Cue.AppImage
+          if-no-files-found: error
+
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.16.0
+      - name: Configure release repository
+        run: |
+          python -c "from pathlib import Path; p=Path('services/release_config.py'); s=p.read_text(); p.write_text(s.replace('GITHUB_REPOSITORY = \"\"', 'GITHUB_REPOSITORY = \"${{ github.repository }}\"'))"
+      - name: Build macOS app
+        run: |
+          pyinstaller \
+            --noconfirm \
+            --clean \
+            --onedir \
+            --windowed \
+            --name "Stage Cue" \
+            --osx-bundle-identifier "tech.gjdev.stagecue" \
+            --hidden-import "PIL" \
+            --hidden-import "PIL._imagingtk" \
+            --hidden-import "PIL._tkinter_finder" \
+            --add-data "client_secret.json:." \
+            --add-data "assets:assets" \
+            main.py
+          ditto -c -k --sequesterRsrc --keepParent \
+            "dist/Stage Cue.app" \
+            "Stage Cue-macOS-${{ matrix.architecture }}.zip"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: stage-cue-macos-${{ matrix.architecture }}
+          path: Stage Cue-macOS-${{ matrix.architecture }}.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: stage-cue-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify release files
+        run: |
+          test -f "release-assets/Stage Cue.exe"
+          test -f "release-assets/Stage Cue.AppImage"
+          test -f "release-assets/Stage Cue-macOS-arm64.zip"
+          test -f "release-assets/Stage Cue-macOS-x64.zip"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "${{ github.ref_name }}" release-assets/* \
+              --repo "${{ github.repository }}" \
+              --clobber
+          else
+            gh release create "${{ github.ref_name }}" \
+              "release-assets/Stage Cue.exe" \
+              "release-assets/Stage Cue.AppImage" \
+              "release-assets/Stage Cue-macOS-arm64.zip" \
+              "release-assets/Stage Cue-macOS-x64.zip" \
+              --repo "${{ github.repository }}" \
+              --generate-notes \
+              --title "Stage Cue ${{ github.ref_name }}"
+          fi

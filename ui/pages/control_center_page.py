@@ -174,7 +174,7 @@ class ControlCenterPage(tk.Frame):
         ).pack(side="left")
         tk.Label(
             brand,
-            text=f"  v{getattr(self.controller, 'app_version', '0.19.0')}",
+            text=f"  v{getattr(self.controller, 'app_version', '0.2.6')}",
             font=ui_font(8, "bold"),
             bg=PALETTE["navy"],
             fg=PALETTE["navy_muted"],
@@ -274,6 +274,14 @@ class ControlCenterPage(tk.Frame):
             "neutral",
             True,
             "keyboard",
+        ).pack(side="left", padx=(px(4), 0))
+        self._button(
+            view,
+            "Check for Updates",
+            lambda: self.controller.check_for_updates(manual=True),
+            "neutral",
+            True,
+            "refresh",
         ).pack(side="left", padx=(px(4), 0))
 
         account = self._toolbar_group(toolbar, "ACCOUNT", side="right")

@@ -7,9 +7,14 @@ import tkinter as tk
 from tkinter import messagebox
 from typing import Any, Callable
 
-from services.config import bundled_resource_path
 from services.errors import AdminRequired, MembershipRequired
 from services.local_settings import LocalSettings
+from services.update_service import (
+    UpdateError,
+    check_for_update,
+    download_update,
+    install_update,
+)
 from ui.appearance_dialog import AppearanceDialog
 from ui.dialogs import (
     AdminDialog,
@@ -55,14 +60,6 @@ class App(tk.Tk):
     def __init__(self, auth_service, db_service, cloud_service, sync_service, stage_publisher):
         super().__init__()
 
-        try:
-            self._stagecue_app_icon = tk.PhotoImage(
-                file=str(bundled_resource_path("assets/stagecue.png"))
-            )
-            self.iconphoto(True, self._stagecue_app_icon)
-        except tk.TclError:
-            pass
-
         self.auth_service = auth_service
         self.db_service = db_service
         self.cloud_service = cloud_service
@@ -81,6 +78,8 @@ class App(tk.Tk):
         self._last_synced_cloud_revision: int | None = None
         self._last_attempted_local_marker: str | None = None
         self._next_sync_retry_at = 0.0
+        self._update_check_in_progress = False
+        self._update_install_in_progress = False
         self.app_version = APP_VERSION
 
         self.local_settings = LocalSettings()
@@ -108,6 +107,104 @@ class App(tk.Tk):
             self.after(500, self.resume_session_online)
         else:
             self.show_page("AuthPage")
+        if self.local_settings.automatically_check_for_updates:
+            self.after(1800, self.check_for_updates)
+
+    def check_for_updates(self, manual: bool = False) -> None:
+        """Check GitHub without blocking Tk and offer a portable update."""
+
+        if self._update_check_in_progress or self._update_install_in_progress:
+            return
+        self._update_check_in_progress = True
+
+        def success(release):
+            self._update_check_in_progress = False
+            if release is None:
+                if manual:
+                    messagebox.showinfo("Stage Cue Update", "Stage Cue is up to date.", parent=self)
+                return
+            if not manual and release.version == self.local_settings.skipped_update_version:
+                return
+            notes = release.notes.strip()
+            if len(notes) > 900:
+                notes = notes[:897].rstrip() + "…"
+            answer = messagebox.askyesnocancel(
+                "Stage Cue Update Available",
+                f"Stage Cue {release.version} is available.\n"
+                f"You are using {APP_VERSION}.\n\n"
+                f"What's new:\n{notes}\n\n"
+                "Install the update and restart Stage Cue now?\n\n"
+                "Yes = Update and restart    No = Remind me later\n"
+                "Cancel = Skip this version",
+                parent=self,
+            )
+            if answer is True:
+                self._begin_update(release)
+            elif answer is None:
+                self.local_settings.skipped_update_version = release.version
+
+        def error(exc):
+            self._update_check_in_progress = False
+            if manual:
+                messagebox.showerror("Stage Cue Update", str(exc), parent=self)
+
+        self.run_background(lambda: check_for_update(APP_VERSION), success, error)
+
+    def _begin_update(self, release) -> None:
+        if self._update_install_in_progress:
+            return
+        page = self.pages.get("ControlCenterPage")
+        if page is not None and bool(getattr(page, "presentation_active", False)):
+            messagebox.showwarning(
+                "Finish Presenting First",
+                "Stage Cue will not update while Present mode is active. Turn Present off, then check again.",
+                parent=self,
+            )
+            return
+        self._update_install_in_progress = True
+        progress = tk.Toplevel(self)
+        progress.title("Updating Stage Cue")
+        progress.transient(self)
+        progress.resizable(False, False)
+        progress.configure(bg=theme.PALETTE["surface"])
+        progress.protocol("WM_DELETE_WINDOW", lambda: None)
+        label_var = tk.StringVar(value=f"Downloading Stage Cue {release.version}…")
+        tk.Label(
+            progress,
+            textvariable=label_var,
+            bg=theme.PALETTE["surface"],
+            fg=theme.PALETTE["text"],
+            font=theme.ui_font(10, "bold"),
+            padx=theme.px(24),
+            pady=theme.px(22),
+        ).pack()
+        progress.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - progress.winfo_width()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - progress.winfo_height()) // 2)
+        progress.geometry(f"+{x}+{y}")
+        progress.grab_set()
+
+        def work():
+            return download_update(release)
+
+        def success(download):
+            label_var.set("Installing update and restarting…")
+            progress.update_idletasks()
+            try:
+                install_update(download)
+            except Exception as exc:
+                self._update_install_in_progress = False
+                progress.destroy()
+                messagebox.showerror("Stage Cue Update", str(exc), parent=self)
+                return
+            self._shutdown()
+
+        def error(exc):
+            self._update_install_in_progress = False
+            progress.destroy()
+            messagebox.showerror("Stage Cue Update", f"The update could not be downloaded.\n\n{exc}", parent=self)
+
+        self.run_background(work, success, error)
 
     # ------------------------------------------------------------------
     # Appearance: per-machine theme and scaling

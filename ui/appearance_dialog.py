@@ -62,6 +62,9 @@ class AppearanceDialog(tk.Toplevel):
             value=self.detected_scale if stored_scale == "auto" else float(stored_scale)
         )
         self.remember_var = tk.BooleanVar(value=self.settings.remember_window_geometry)
+        self.update_check_var = tk.BooleanVar(
+            value=self.settings.automatically_check_for_updates
+        )
 
         self._build()
         self._sync_scale_state()
@@ -279,6 +282,11 @@ class AppearanceDialog(tk.Toplevel):
             text="Reopen on the same monitor and window size next time",
             variable=self.remember_var,
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(px(10), 0))
+        ttk.Checkbutton(
+            body,
+            text="Automatically check GitHub for Stage Cue updates",
+            variable=self.update_check_var,
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(px(6), 0))
         return card
 
     def _build_preview_section(self, parent):
@@ -369,6 +377,7 @@ class AppearanceDialog(tk.Toplevel):
         self.theme_var.set("light")
         self.automatic_var.set(True)
         self.remember_var.set(True)
+        self.update_check_var.set(True)
         self._sync_scale_state()
         self._sync_preview()
 
@@ -378,6 +387,8 @@ class AppearanceDialog(tk.Toplevel):
             self.scale_var.get()
         )
         remember = bool(self.remember_var.get())
+        automatic_updates = bool(self.update_check_var.get())
+        self.settings.automatically_check_for_updates = automatic_updates
         unchanged = (
             theme == current_theme()
             and self.settings.ui_scale == scale

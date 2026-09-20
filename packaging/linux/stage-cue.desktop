@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Stage Cue
+Comment=Church lyrics and stage presentation controller
+Exec="Stage Cue"
+Icon=stage-cue
+Type=Application
+Categories=AudioVideo;Presentation;
+Terminal=false
