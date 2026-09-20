@@ -220,7 +220,11 @@ def _windows_install(download: Path) -> None:
         "exit /b 1\r\n"
     )
     script.write_text(content, encoding="utf-8", newline="")
-    subprocess.Popen(["cmd", "/c", "start", "", "/min", str(script)], close_fds=True)
+    subprocess.Popen(
+        ["cmd", "/c", "start", "", "/min", str(script)],
+        close_fds=True,
+        env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+    )
 
 
 def _linux_install(download: Path) -> None:
