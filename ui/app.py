@@ -57,7 +57,7 @@ class App(tk.Tk):
 
         try:
             self._stagecue_app_icon = tk.PhotoImage(
-                file=str(bundled_resource_path("assets/icon.png"))
+                file=str(bundled_resource_path("assets/stagecue.png"))
             )
             self.iconphoto(True, self._stagecue_app_icon)
         except tk.TclError:
