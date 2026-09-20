@@ -86,6 +86,7 @@ class App(tk.Tk):
         self._apply_local_appearance()
 
         self.title(f"Stage Cue {APP_VERSION}")
+        self.iconphoto(True, tk.PhotoImage(file='assets/stagecue.png'))
         self._restore_window_geometry()
         self.configure(bg=theme.PALETTE["canvas"])
 
