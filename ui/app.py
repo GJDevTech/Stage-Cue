@@ -6,6 +6,8 @@ from time import monotonic
 import tkinter as tk
 from tkinter import messagebox
 from typing import Any, Callable
+import sys
+from pathlib import Path
 
 from services.errors import AdminRequired, MembershipRequired
 from services.local_settings import LocalSettings
@@ -86,7 +88,13 @@ class App(tk.Tk):
         self._apply_local_appearance()
 
         self.title(f"Stage Cue {APP_VERSION}")
-        self.iconphoto(True, tk.PhotoImage(file='assets/stagecue.png'))
+        resource_root = Path(
+            getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)
+        )
+        self._app_icon = tk.PhotoImage(
+            file=str(resource_root / "assets" / "stagecue.png")
+        )
+        self.iconphoto(True, self._app_icon)
         self._restore_window_geometry()
         self.configure(bg=theme.PALETTE["canvas"])
 
