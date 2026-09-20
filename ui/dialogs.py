@@ -289,14 +289,13 @@ class GlobalLibraryDialog(tk.Toplevel):
         self.songbooks = self.db.list_global_songbooks()
         self.songs = self.db.list_global_songs()
         self.title("Import Songs and Songbooks")
-        fit_toplevel(self, 850, 530, 700, 420)
+        fit_toplevel(self, 820, 590, 680, 460)
         self.configure(bg=PALETTE["canvas"])
         self.transient(controller)
 
         body = tk.Frame(self, bg=PALETTE["canvas"], padx=px(22), pady=px(22))
         body.pack(fill="both", expand=True)
         body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, weight=2)
         body.grid_rowconfigure(1, weight=1)
         self.status_var = tk.StringVar(
             value=(
@@ -312,54 +311,140 @@ class GlobalLibraryDialog(tk.Toplevel):
             anchor="w",
             padx=px(10),
             pady=px(7),
-        ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(px(0), px(10)))
+        ).grid(row=0, column=0, sticky="ew", pady=(px(0), px(10)))
 
-        left = AdminDialog._panel(body, "Published songbooks")
-        left.grid(row=1, column=0, sticky="nsew", padx=(px(0), px(6)))
-        self.book_list = tk.Listbox(left, font=ui_font(10))
-        self.book_list.pack(fill="both", expand=True, padx=px(10), pady=px(8))
-        for book in self.songbooks:
-            source = book.get("source_church_name") or "Unknown church"
-            self.book_list.insert(tk.END, f"{book['name']}  —  from {source}")
-        action_button(left, "Import Songbook", self.import_songbook, "#16a34a").pack(
-            anchor="w", padx=px(10), pady=(px(0), px(10))
+        panel = AdminDialog._panel(body, "Published songbooks and songs")
+        panel.grid(row=1, column=0, sticky="nsew")
+
+        tree_frame = tk.Frame(panel, bg=PALETTE["surface"])
+        tree_frame.pack(fill="both", expand=True, padx=px(10), pady=(px(8), px(5)))
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        self.library_tree = ttk.Treeview(
+            tree_frame,
+            columns=("source",),
+            show="tree headings",
+            selectmode="extended",
+            style="StageCue.Treeview",
         )
+        self.library_tree.heading("#0", text="Songbook / Song", anchor="w")
+        self.library_tree.heading("source", text="Published by", anchor="w")
+        self.library_tree.column("#0", width=px(430), minwidth=px(260), stretch=True)
+        self.library_tree.column("source", width=px(210), minwidth=px(130), stretch=True)
+        scrollbar = ttk.Scrollbar(
+            tree_frame, orient="vertical", command=self.library_tree.yview
+        )
+        self.library_tree.configure(yscrollcommand=scrollbar.set)
+        self.library_tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
 
-        right = AdminDialog._panel(body, "Published songs")
-        right.grid(row=1, column=1, sticky="nsew", padx=(px(6), px(0)))
-        self.song_list = tk.Listbox(right, font=ui_font(10))
-        self.song_list.pack(fill="both", expand=True, padx=px(10), pady=px(8))
+        self.book_by_id = {str(book["id"]): book for book in self.songbooks}
+        self.song_by_id = {str(song["id"]): song for song in self.songs}
+        songs_by_book: dict[str, list[dict]] = {}
         for song in self.songs:
-            source = song.get("source_church_name") or "Unknown church"
-            self.song_list.insert(tk.END, f"{song['title']}  —  from {source}")
-        action_button(right, "Import Song", self.import_song, "#16a34a").pack(
-            anchor="w", padx=px(10), pady=(px(0), px(10))
-        )
+            songs_by_book.setdefault(str(song.get("global_songbook_id") or ""), []).append(song)
 
-    def import_songbook(self):
-        selection = self.book_list.curselection()
-        if not selection:
-            self.status_var.set("Select a global songbook first.")
+        for book in self.songbooks:
+            book_id = str(book["id"])
+            source = book.get("source_church_name") or "Unknown church"
+            parent = self.library_tree.insert(
+                "",
+                tk.END,
+                iid=f"book:{book_id}",
+                text=str(book.get("name") or "Untitled songbook"),
+                values=(source,),
+                open=True,
+            )
+            for song in sorted(
+                songs_by_book.pop(book_id, []),
+                key=lambda item: str(item.get("title") or "").casefold(),
+            ):
+                self.library_tree.insert(
+                    parent,
+                    tk.END,
+                    iid=f"song:{song['id']}",
+                    text=str(song.get("title") or "Untitled song"),
+                    values=(source,),
+                )
+
+        orphan_songs = [song for songs in songs_by_book.values() for song in songs]
+        if orphan_songs:
+            parent = self.library_tree.insert(
+                "", tk.END, iid="other", text="Other published songs", open=True
+            )
+            for song in sorted(
+                orphan_songs,
+                key=lambda item: str(item.get("title") or "").casefold(),
+            ):
+                source = song.get("source_church_name") or "Unknown church"
+                self.library_tree.insert(
+                    parent,
+                    tk.END,
+                    iid=f"song:{song['id']}",
+                    text=str(song.get("title") or "Untitled song"),
+                    values=(source,),
+                )
+
+        controls = tk.Frame(panel, bg=PALETTE["surface"])
+        controls.pack(fill="x", padx=px(10), pady=(px(0), px(10)))
+        tk.Label(
+            controls,
+            text="Use Ctrl/Command-click or Shift-click to select multiple songbooks and songs.",
+            bg=PALETTE["surface"],
+            fg=PALETTE["muted"],
+            font=ui_font(8),
+        ).pack(side="left")
+        action_button(
+            controls, "Import Selected", self.import_selected, "#16a34a"
+        ).pack(side="right")
+
+    def selected_imports(self) -> tuple[list[dict], list[dict]]:
+        selected = set(self.library_tree.selection())
+        selected_book_ids = {
+            item.split(":", 1)[1] for item in selected if item.startswith("book:")
+        }
+        books = [
+            self.book_by_id[book_id]
+            for book_id in selected_book_ids
+            if book_id in self.book_by_id
+        ]
+        songs = []
+        for item in selected:
+            if not item.startswith("song:"):
+                continue
+            song = self.song_by_id.get(item.split(":", 1)[1])
+            if song is None:
+                continue
+            # The whole-book import already includes this child song.
+            if str(song.get("global_songbook_id") or "") in selected_book_ids:
+                continue
+            songs.append(song)
+        return books, songs
+
+    def import_selected(self):
+        books, songs = self.selected_imports()
+        if not books and not songs:
+            self.status_var.set("Select one or more songbooks or songs first.")
             return
         church_id = self.controller.current_session["church"]["id"]
-        book = self.songbooks[selection[0]]
-        self.db.import_global_songbook(church_id, book["id"])
-        self.controller.pages["ControlCenterPage"].refresh()
-        self.status_var.set(f"Imported '{book['name']}' as an independent copy.")
-
-    def import_song(self):
-        selection = self.song_list.curselection()
-        if not selection:
-            self.status_var.set("Select a global song first.")
+        control_center = self.controller.pages["ControlCenterPage"]
+        target_book = control_center.selected_songbook_id()
+        try:
+            for book in books:
+                self.db.import_global_songbook(church_id, book["id"])
+            for song in songs:
+                self.db.import_global_song(church_id, song["id"], target_book)
+        except Exception as exc:
+            self.status_var.set(f"Import stopped: {exc}")
+            control_center.refresh()
             return
-        church_id = self.controller.current_session["church"]["id"]
-        target_book = self.controller.pages[
-            "ControlCenterPage"
-        ].selected_songbook_id()
-        song = self.songs[selection[0]]
-        self.db.import_global_song(church_id, song["id"], target_book)
-        self.controller.pages["ControlCenterPage"].refresh()
-        self.status_var.set(f"Imported '{song['title']}' as an independent copy.")
+        control_center.refresh()
+        parts = []
+        if books:
+            parts.append(f"{len(books)} songbook(s)")
+        if songs:
+            parts.append(f"{len(songs)} individual song(s)")
+        self.status_var.set(f"Imported {' and '.join(parts)} as independent copies.")
 
 
 class DisplaySettingsDialog(tk.Toplevel):

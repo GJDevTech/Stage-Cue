@@ -44,10 +44,11 @@ jobs:
             --add-data "client_secret.json:." `
             --add-data "assets:assets" `
             main.py
+          Move-Item "dist/Stage Cue.exe" "dist/StageCue.exe"
       - uses: actions/upload-artifact@v6
         with:
           name: stage-cue-windows
-          path: dist/Stage Cue.exe
+          path: dist/StageCue.exe
           if-no-files-found: error
 
   build-linux:
@@ -100,12 +101,12 @@ jobs:
             -o appimagetool \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool --appimage-extract-and-run "Stage Cue.AppDir" "Stage Cue.AppImage"
-          chmod +x "Stage Cue.AppImage"
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run "Stage Cue.AppDir" "StageCue.AppImage"
+          chmod +x "StageCue.AppImage"
       - uses: actions/upload-artifact@v6
         with:
           name: stage-cue-linux
-          path: Stage Cue.AppImage
+          path: StageCue.AppImage
           if-no-files-found: error
 
   build-macos:
@@ -152,11 +153,11 @@ jobs:
             main.py
           ditto -c -k --sequesterRsrc --keepParent \
             "dist/Stage Cue.app" \
-            "Stage Cue-macOS-${{ matrix.architecture }}.zip"
+            "StageCue-macOS-${{ matrix.architecture }}.zip"
       - uses: actions/upload-artifact@v6
         with:
           name: stage-cue-macos-${{ matrix.architecture }}
-          path: Stage Cue-macOS-${{ matrix.architecture }}.zip
+          path: StageCue-macOS-${{ matrix.architecture }}.zip
           if-no-files-found: error
 
   release:
@@ -171,10 +172,10 @@ jobs:
           merge-multiple: true
       - name: Verify release files
         run: |
-          test -f "release-assets/Stage Cue.exe"
-          test -f "release-assets/Stage Cue.AppImage"
-          test -f "release-assets/Stage Cue-macOS-arm64.zip"
-          test -f "release-assets/Stage Cue-macOS-x64.zip"
+          test -f "release-assets/StageCue.exe"
+          test -f "release-assets/StageCue.AppImage"
+          test -f "release-assets/StageCue-macOS-arm64.zip"
+          test -f "release-assets/StageCue-macOS-x64.zip"
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -185,10 +186,10 @@ jobs:
               --clobber
           else
             gh release create "${{ github.ref_name }}" \
-              "release-assets/Stage Cue.exe" \
-              "release-assets/Stage Cue.AppImage" \
-              "release-assets/Stage Cue-macOS-arm64.zip" \
-              "release-assets/Stage Cue-macOS-x64.zip" \
+              "release-assets/StageCue.exe" \
+              "release-assets/StageCue.AppImage" \
+              "release-assets/StageCue-macOS-arm64.zip" \
+              "release-assets/StageCue-macOS-x64.zip" \
               --repo "${{ github.repository }}" \
               --generate-notes \
               --title "Stage Cue ${{ github.ref_name }}"

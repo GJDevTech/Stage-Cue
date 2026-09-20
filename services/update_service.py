@@ -84,12 +84,19 @@ def _target_asset_names() -> tuple[str, ...]:
     system = platform.system()
     machine = platform.machine().lower()
     if system == "Windows":
-        return ("Stage Cue.exe",)
+        return ("StageCue.exe", "Stage.Cue.exe", "Stage Cue.exe")
     if system == "Linux":
-        return ("Stage Cue.AppImage",)
+        return ("StageCue.AppImage", "Stage.Cue.AppImage", "Stage Cue.AppImage")
     if system == "Darwin":
         architecture = "arm64" if machine in {"arm64", "aarch64"} else "x64"
-        return (f"Stage Cue-macOS-{architecture}.zip", "Stage Cue-macOS.zip")
+        return (
+            f"StageCue-macOS-{architecture}.zip",
+            f"Stage.Cue-macOS-{architecture}.zip",
+            f"Stage Cue-macOS-{architecture}.zip",
+            "StageCue-macOS.zip",
+            "Stage.Cue-macOS.zip",
+            "Stage Cue-macOS.zip",
+        )
     raise UpdateError(f"Automatic updates are not supported on {system}.")
 
 
