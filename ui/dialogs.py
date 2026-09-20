@@ -451,8 +451,13 @@ class DisplaySettingsDialog(tk.Toplevel):
     def __init__(self, controller, view_type="live"):
         super().__init__(controller)
         self.controller = controller
-        self.view_type = "stage" if view_type == "stage" else "live"
-        self.view_label = "Stage View" if self.view_type == "stage" else "Live View"
+        requested_view = str(view_type).strip().casefold()
+        self.view_type = requested_view if requested_view in {"live", "stage", "message"} else "live"
+        self.view_label = {
+            "live": "Live View",
+            "stage": "Stage View",
+            "message": "Custom Message",
+        }[self.view_type]
         church_id = controller.current_session["church"]["id"]
         settings = controller.db_service.get_display_settings(
             church_id, self.view_type
@@ -558,7 +563,7 @@ class DisplaySettingsDialog(tk.Toplevel):
             logo_tab = self._add_scrollable_tab(notebook, "Church Logo")
             self._build_background_tab(background_tab)
             self._build_logo_tab(logo_tab)
-        else:
+        elif self.view_type == "stage":
             upcoming_tab = self._add_scrollable_tab(notebook, "Upcoming Slides")
             self._build_upcoming_tab(upcoming_tab)
         notebook.bind("<<NotebookTabChanged>>", self._display_settings_tab_changed)
@@ -646,7 +651,11 @@ class DisplaySettingsDialog(tk.Toplevel):
         self.layout_sample_id = self.layout_canvas.create_text(
             0,
             0,
-            text="Sample song lyrics\ninside the text box",
+            text=(
+                "Service begins in 10 minutes"
+                if self.view_type == "message"
+                else "Sample song lyrics\ninside the text box"
+            ),
             fill="white",
             font=("Arial", 16, "bold"),
         )
@@ -857,7 +866,11 @@ class DisplaySettingsDialog(tk.Toplevel):
                 "Blank lines begin a new slide group. Within each group, Stage Cue "
                 "applies this line limit. Set it to 2 for two-line slides."
                 if self.view_type == "live"
-                else "Stage View uses the slides created by the Live View line limit."
+                else (
+                    "Stage View uses the slides created by the Live View line limit."
+                    if self.view_type == "stage"
+                    else "Custom messages use this text box independently of lyric styles."
+                )
             ),
             bg=PALETTE["surface"],
             fg=PALETTE["muted"],

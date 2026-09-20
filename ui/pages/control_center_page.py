@@ -130,6 +130,7 @@ class ControlCenterPage(tk.Frame):
         self.logo_visible = False
         self.live_display_settings: dict[str, Any] = {}
         self.stage_display_settings: dict[str, Any] = {}
+        self.message_display_settings: dict[str, Any] = {}
         self.display_settings: dict[str, Any] = {}
         self.bible_service = BibleService()
         self.bible_passage: BiblePassage | None = None
@@ -246,6 +247,14 @@ class ControlCenterPage(tk.Frame):
             "purple",
             True,
             "palette",
+        ).pack(side="left", padx=(px(4), 0))
+        self._button(
+            self.admin_group,
+            "Message Style",
+            lambda: self.controller.open_display_settings("message"),
+            "purple",
+            True,
+            "message",
         ).pack(side="left", padx=(px(4), 0))
 
         self.output_group = self._toolbar_group(toolbar, "OUTPUT")
@@ -2608,6 +2617,9 @@ class ControlCenterPage(tk.Frame):
         self.stage_display_settings = self.db.get_display_settings(
             self.church_id(), "stage"
         )
+        self.message_display_settings = self.db.get_display_settings(
+            self.church_id(), "message"
+        )
         # Retain the existing name for slide generation and the in-app Preview.
         self.display_settings = self.live_display_settings
         self._rebuild_slides()
@@ -2650,13 +2662,43 @@ class ControlCenterPage(tk.Frame):
             self.preview_canvas.configure(width=canvas_width, height=canvas_height)
 
     def _upcoming_slides_after_live(self, count):
+        """Return upcoming cues, continuing into later songs in the agenda."""
+
         if self.live_slide is None:
             return []
         try:
             index = self.slides.index(self.live_slide)
         except ValueError:
             return []
-        return self.slides[index + 1 : index + 1 + max(0, count)]
+        limit = max(0, count)
+        upcoming = [
+            {"slide": slide, "title": self.live_song_title}
+            for slide in self.slides[index + 1 : index + 1 + limit]
+        ]
+        if len(upcoming) >= limit:
+            return upcoming
+
+        selection = self.agenda_list.curselection()
+        if not selection:
+            return upcoming
+        max_lines = int(self.live_display_settings.get("maxLinesPerSlide", 4))
+        for item in self.service_items[selection[0] + 1 :]:
+            if item.get("_kind") != "song":
+                continue
+            title = str(item.get("title") or "Untitled")
+            segments = normalize_segments(item.get("segments"), item.get("lyrics", ""))
+            for slide in build_segment_slides(segments, max_lines):
+                upcoming.append({"slide": slide, "title": title})
+                if len(upcoming) >= limit:
+                    return upcoming
+        return upcoming
+
+    @staticmethod
+    def _stage_lyric_text(title, segment, lyrics):
+        """Include cue context for Stage View clients that render only text."""
+
+        heading = " · ".join(part for part in (title, segment) if part)
+        return f"{heading}\n\n{lyrics}" if heading and lyrics else heading or lyrics
 
     def _presentation_cue(self, view_type="live", preview=False):
         is_stage = view_type == "stage"
@@ -2681,6 +2723,7 @@ class ControlCenterPage(tk.Frame):
                 mode = "LIVE"
                 slide = None
                 title = "Stage message"
+                settings = self.message_display_settings
             else:
                 mode = "LIVE" if slide else "READY"
             # Hide Text and Logo are intentionally local-only controls.
@@ -2703,13 +2746,17 @@ class ControlCenterPage(tk.Frame):
             )
         else:
             upcoming = []
-        next_slide = upcoming[0] if upcoming else None
+        next_cue = upcoming[0] if upcoming else None
+        next_slide = next_cue["slide"] if next_cue else None
+        next_title = next_cue["title"] if next_cue else ""
         if is_stage and not preview and self.stage_mode == "MESSAGE":
             cue_text = self.stage_message
             segment = "Message"
         else:
             cue_text = slide.text if slide and mode not in {"CLEAR", "READY"} else ""
             segment = slide.label if slide else ""
+            if is_stage and cue_text:
+                cue_text = self._stage_lyric_text(title, segment, cue_text)
         return {
             "version": 2,
             "kind": "message" if is_stage and self.stage_mode == "MESSAGE" else "lyrics",
@@ -2717,13 +2764,21 @@ class ControlCenterPage(tk.Frame):
             "segment": segment,
             "text": cue_text,
             "nextText": (
-                next_slide.text
+                self._stage_lyric_text(next_title, next_slide.label, next_slide.text)
                 if next_slide and settings.get("showNextSlide", False)
                 else ""
             ),
+            "nextTitle": next_title,
             "nextSegment": next_slide.label if next_slide else "",
             "upcomingSlides": [
-                {"text": item.text, "segment": item.label}
+                {
+                    "title": item["title"],
+                    "segment": item["slide"].label,
+                    "lyrics": item["slide"].text,
+                    "text": self._stage_lyric_text(
+                        item["title"], item["slide"].label, item["slide"].text
+                    ),
+                }
                 for item in upcoming
             ],
             "mode": mode,

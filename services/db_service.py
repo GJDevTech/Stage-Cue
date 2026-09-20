@@ -60,13 +60,19 @@ DEFAULT_STAGE_DISPLAY_SETTINGS: dict[str, Any] = {
     "nextSlideCount": 0,
 }
 
+DEFAULT_MESSAGE_DISPLAY_SETTINGS: dict[str, Any] = {
+    **DEFAULT_DISPLAY_SETTINGS,
+    "fontSize": 64,
+}
+
 
 def default_display_settings_bundle() -> dict[str, dict[str, Any]]:
-    """Return independent per-church settings for both presentation targets."""
+    """Return independent per-church settings for every presentation target."""
 
     return {
         "liveView": dict(DEFAULT_DISPLAY_SETTINGS),
         "stageView": dict(DEFAULT_STAGE_DISPLAY_SETTINGS),
+        "messageView": dict(DEFAULT_MESSAGE_DISPLAY_SETTINGS),
     }
 
 
@@ -608,7 +614,11 @@ class DatabaseService:
             return "liveView"
         if normalized in {"stage", "stageview"}:
             return "stageView"
-        raise ValueError("Display target must be Live View or Stage View.")
+        if normalized in {"message", "messageview", "custommessage"}:
+            return "messageView"
+        raise ValueError(
+            "Display target must be Live View, Stage View, or Custom Message."
+        )
 
     @staticmethod
     def _as_boolean(value: Any) -> bool:
@@ -622,22 +632,33 @@ class DatabaseService:
     ) -> dict[str, dict[str, Any]]:
         if not isinstance(stored, dict):
             stored = {}
-        is_bundle = "liveView" in stored or "stageView" in stored
+        is_bundle = any(
+            key in stored for key in ("liveView", "stageView", "messageView")
+        )
         if is_bundle:
             live_source = stored.get("liveView")
             stage_source = stored.get("stageView")
+            message_source = stored.get("messageView")
             live_source = live_source if isinstance(live_source, dict) else {}
             stage_source = (
                 stage_source
                 if isinstance(stage_source, dict)
                 else live_source
             )
+            # Existing installations used the Stage View style for messages.
+            message_source = (
+                message_source
+                if isinstance(message_source, dict)
+                else stage_source
+            )
         else:
             # Older installations stored one flat style. Use it for both views.
             live_source = stored
             stage_source = stored
+            message_source = stored if stored else DEFAULT_MESSAGE_DISPLAY_SETTINGS
         live = cls._validate_display_settings(live_source)
         stage = cls._validate_display_settings(stage_source)
+        message = cls._validate_display_settings(message_source)
         fallback_count = 1 if cls._as_boolean(
             stage_source.get("showNextSlide", False)
         ) else 0
@@ -649,7 +670,11 @@ class DatabaseService:
             next_slide_count = fallback_count
         stage["nextSlideCount"] = max(0, min(5, next_slide_count))
         stage["showNextSlide"] = stage["nextSlideCount"] > 0
-        return {"liveView": live, "stageView": stage}
+        return {
+            "liveView": live,
+            "stageView": stage,
+            "messageView": message,
+        }
 
     @staticmethod
     def _validate_display_settings(settings: dict[str, Any]) -> dict[str, Any]:
