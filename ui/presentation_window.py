@@ -69,5 +69,5 @@ class PresentationWindow(tk.Toplevel):
         if not self._opened or not self.winfo_viewable():
             self.open_on_output_display()
         self.renderer.render(cue)
-        # Paint Live View before the Render cue is serialized and queued.
+        # Paint Live View before the remote Stage View cue is serialized and queued.
         self.canvas.update_idletasks()

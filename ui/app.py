@@ -72,6 +72,10 @@ class App(tk.Tk):
         self.current_account = (
             dict(self.current_session["user"]) if self.current_session else None
         )
+        if self.current_session:
+            church_id = str(self.current_session["church"]["id"])
+            self.stage_publisher.set_church(church_id)
+            self.publish_stage_view_styles()
         self.pending_profile = None
         self.current_page_name = None
         self._background_results: Queue[tuple] = Queue()
@@ -486,6 +490,9 @@ class App(tk.Tk):
         self.current_session = session
         self.current_account = dict(session["user"])
         self.db_service.save_cached_session(session)
+        church_id = str(session["church"]["id"])
+        self.stage_publisher.set_church(church_id)
+        self.publish_stage_view_styles()
         self._last_synced_cloud_revision = None
         self._last_attempted_local_marker = None
         self._next_sync_retry_at = 0.0
@@ -525,6 +532,8 @@ class App(tk.Tk):
             self.current_account = account
             self.current_session = session
             self.db_service.save_cached_session(session)
+            self.stage_publisher.set_church(church_id)
+            self.publish_stage_view_styles()
             page.refresh()
             page.show_sync_result(result)
 
@@ -637,10 +646,28 @@ class App(tk.Tk):
                 stage_view_cue,
             )
 
-    def configure_stage_publisher(self, server_url, token) -> None:
-        self.db_service.set_setting("render_server_url", server_url.strip())
-        self.db_service.set_setting("render_control_token", token.strip())
-        self.stage_publisher.configure(server_url, token)
+    def publish_stage_view_styles(self) -> None:
+        """Keep the hosted Stage View styles aligned with this church's settings."""
+        if not self.current_session:
+            return
+        church_id = str(self.current_session["church"]["id"])
+        stage_style = self.db_service.get_display_settings(church_id, "stage")
+        message_style = self.db_service.get_display_settings(church_id, "message")
+        self.stage_publisher.publish_styles(church_id, stage_style, message_style)
+
+    def configure_stage_publisher(
+        self, database_url: str, hosting_url: str, api_key: str
+    ) -> None:
+        self.db_service.set_setting("firebase_database_url", database_url.strip())
+        self.db_service.set_setting("firebase_hosting_url", hosting_url.strip())
+        self.db_service.set_setting("firebase_api_key", api_key.strip())
+        self.stage_publisher.configure(database_url, hosting_url, api_key)
+        if self.current_session:
+            church_id = str(self.current_session["church"]["id"])
+            self.stage_publisher.set_church(church_id)
+            self.publish_stage_view_styles()
+            # A newly completed Firebase setup should start from a blank Stage View.
+            self.stage_publisher.clear(church_id)
 
     def _shutdown(self) -> None:
         self._remember_window_geometry()
@@ -711,6 +738,7 @@ class App(tk.Tk):
             return
         self.auth_service.logout()
         self.db_service.clear_cached_session()
+        self.stage_publisher.set_church(None)
         self.current_session = None
         self.current_account = None
         self.pending_profile = None

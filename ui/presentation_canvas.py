@@ -23,6 +23,7 @@ class PresentationCanvasRenderer:
         self.canvas = canvas
         self.state: dict[str, Any] = {}
         self.background_id = canvas.create_image(0, 0, anchor="nw", state="hidden")
+        self.content_image_id = canvas.create_image(0, 0, anchor="nw", state="hidden")
         self.shadow_id = canvas.create_text(0, 0, text="")
         self.outline_ids = [canvas.create_text(0, 0, text="") for _ in range(8)]
         self.text_id = canvas.create_text(0, 0, text="")
@@ -33,6 +34,10 @@ class PresentationCanvasRenderer:
         self._background_image = None
         self._background_photo = None
         self._background_photo_key = None
+        self._content_image_source = ""
+        self._content_image = None
+        self._content_photo = None
+        self._content_photo_key = None
         self._video_capture = None
         self._video_job = None
         self._video_delay_ms = 33
@@ -51,9 +56,12 @@ class PresentationCanvasRenderer:
             bg="#000000" if blackout else settings.get("backgroundColor", "#000000")
         )
         self._load_background(settings)
+        image_data = str(state.get("imageData", ""))
+        self._load_content_image(image_data)
+        has_content_image = self._content_image is not None
         text = (
             ""
-            if blackout or state.get("textHidden")
+            if blackout or state.get("textHidden") or has_content_image
             else apply_text_case(
                 str(state.get("text", "")), settings.get("textCase", "preserve")
             )
@@ -82,6 +90,8 @@ class PresentationCanvasRenderer:
             fill=settings.get("textColor", "#FFFFFF"),
             state="normal" if text else "hidden",
         )
+        # Keep the logo loaded even for presentation-image cues so local
+        # Show Logo can replace the slide without re-rendering the deck.
         self._load_logo(settings.get("logoData", ""))
         self.resize()
 
@@ -135,12 +145,14 @@ class PresentationCanvasRenderer:
             settings.get("shadowOffsetY", 0),
             bool(self.state.get("logoVisible")),
             self._logo_source,
+            self._content_image_source,
             settings.get("logoX", 5),
             settings.get("logoY", 5),
             settings.get("logoWidth", 20),
         )
         if layout_key == self._layout_key:
             self._resize_background(width, height, settings)
+            self._resize_content_image(width, height)
             return
         self._layout_key = layout_key
         layout = calculate_text_box_layout(width, height, settings)
@@ -175,6 +187,7 @@ class PresentationCanvasRenderer:
         self.canvas.coords(self.text_id, x, y)
         self.canvas.itemconfigure(self.text_id, font=fitted_font, anchor=anchor)
         self._resize_logo(width, height, settings)
+        self._resize_content_image(width, height)
 
     def _load_background(self, settings: dict[str, Any]) -> None:
         kind = str(settings.get("backgroundType", "solid")).casefold()
@@ -296,6 +309,64 @@ class PresentationCanvasRenderer:
             self.background_id, image=self._background_photo, state="normal"
         )
         self.canvas.tag_lower(self.background_id)
+
+
+    def _load_content_image(self, data_url: str) -> None:
+        if data_url == self._content_image_source:
+            return
+        self._content_image_source = data_url
+        self._content_image = None
+        # Tk canvas items retain the Tcl image name even after Pillow releases
+        # the Python PhotoImage object. Detach it first or a later itemconfigure
+        # can fail with: image "pyimageNN" doesn't exist.
+        try:
+            self.canvas.itemconfigure(self.content_image_id, image="", state="hidden")
+        except tk.TclError:
+            pass
+        self._content_photo = None
+        self._content_photo_key = None
+        if not data_url or "," not in data_url:
+            return
+        try:
+            encoded = data_url.split(",", 1)[1]
+            self._content_image = Image.open(
+                BytesIO(base64.b64decode(encoded))
+            ).convert("RGB")
+        except Exception:
+            self._content_image = None
+
+    def _resize_content_image(self, width: int, height: int) -> None:
+        if (
+            self.state.get("mode") == "BLACKOUT"
+            or self.state.get("textHidden")
+            or self.state.get("logoVisible")
+            or self._content_image is None
+        ):
+            try:
+                self.canvas.itemconfigure(self.content_image_id, state="hidden")
+            except tk.TclError:
+                # The canvas may be in the middle of destroying/replacing an
+                # old PhotoImage during a rapid agenda/slide selection.
+                try:
+                    self.canvas.itemconfigure(self.content_image_id, image="", state="hidden")
+                except tk.TclError:
+                    pass
+            return
+        photo_key = (self._content_image_source, int(width), int(height))
+        if self._content_photo is None or self._content_photo_key != photo_key:
+            canvas = Image.new("RGB", (max(1, int(width)), max(1, int(height))), "black")
+            fitted = self._content_image.copy()
+            fitted.thumbnail(canvas.size, Image.Resampling.LANCZOS)
+            x = (canvas.width - fitted.width) // 2
+            y = (canvas.height - fitted.height) // 2
+            canvas.paste(fitted, (x, y))
+            self._content_photo = ImageTk.PhotoImage(canvas)
+            self._content_photo_key = photo_key
+        self.canvas.coords(self.content_image_id, 0, 0)
+        self.canvas.itemconfigure(
+            self.content_image_id, image=self._content_photo, state="normal"
+        )
+        self.canvas.tag_raise(self.content_image_id)
 
     def _fit_font(self, text, family, requested_size, box_width, box_height, bold, italic):
         cache_key = (

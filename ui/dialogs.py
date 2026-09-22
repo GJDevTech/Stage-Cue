@@ -3,7 +3,6 @@ from io import BytesIO
 from pathlib import Path
 import tkinter as tk
 from tkinter import colorchooser, filedialog, font as tkfont, messagebox, simpledialog, ttk
-from urllib.parse import quote
 
 from PIL import Image, ImageOps, ImageTk
 
@@ -462,6 +461,11 @@ class DisplaySettingsDialog(tk.Toplevel):
         settings = controller.db_service.get_display_settings(
             church_id, self.view_type
         )
+        self.message_settings = (
+            controller.db_service.get_display_settings(church_id, "message")
+            if self.view_type == "stage"
+            else None
+        )
 
         self.title(f"{self.view_label} Display Settings")
         fit_toplevel(self, 920, 820, 740, 600)
@@ -512,6 +516,49 @@ class DisplaySettingsDialog(tk.Toplevel):
             key: tk.BooleanVar(value=bool(settings[key]))
             for key in ("bold", "italic", "outlineEnabled", "shadowEnabled")
         }
+        if self.view_type == "stage":
+            self.flags.update(
+                {
+                    "showCurrentSongTitle": tk.BooleanVar(
+                        value=bool(settings.get("showCurrentSongTitle", True))
+                    ),
+                    "showSectionType": tk.BooleanVar(
+                        value=bool(settings.get("showSectionType", True))
+                    ),
+                    "showUpcomingSongTitle": tk.BooleanVar(
+                        value=bool(settings.get("showUpcomingSongTitle", True))
+                    ),
+                }
+            )
+        self.context_style_values = {}
+        self.context_style_flags = {}
+        if self.view_type == "stage":
+            context_defaults = {
+                "songTitleStyle": {
+                    "fontFamily": "Arial", "fontSize": 30, "textColor": "#FFFFFF",
+                    "textCase": "preserve", "bold": True, "italic": False,
+                },
+                "sectionTypeStyle": {
+                    "fontFamily": "Arial", "fontSize": 23, "textColor": "#D1D5DB",
+                    "textCase": "preserve", "bold": False, "italic": False,
+                },
+                "upcomingSongTitleStyle": {
+                    "fontFamily": "Arial", "fontSize": 24, "textColor": "#F8FAFC",
+                    "textCase": "preserve", "bold": True, "italic": False,
+                },
+            }
+            for style_key, defaults in context_defaults.items():
+                source = settings.get(style_key)
+                source = source if isinstance(source, dict) else {}
+                merged = {**defaults, **source}
+                self.context_style_values[style_key] = {
+                    key: tk.StringVar(value=str(merged[key]))
+                    for key in ("fontFamily", "fontSize", "textColor", "textCase")
+                }
+                self.context_style_flags[style_key] = {
+                    key: tk.BooleanVar(value=bool(merged[key]))
+                    for key in ("bold", "italic")
+                }
         self.text_horizontal_alignment = tk.StringVar(
             value=settings["textHorizontalAlign"]
         )
@@ -521,6 +568,30 @@ class DisplaySettingsDialog(tk.Toplevel):
         self.next_slide_count = tk.StringVar(
             value=str(settings.get("nextSlideCount", 0))
         )
+        self.message_values = {}
+        self.message_flags = {}
+        self.message_horizontal_alignment = tk.StringVar(value="center")
+        self.message_vertical_alignment = tk.StringVar(value="center")
+        if self.message_settings is not None:
+            self.message_values = {
+                key: tk.StringVar(value=str(self.message_settings[key]))
+                for key in (
+                    "fontFamily", "fontSize", "textColor", "textCase",
+                    "backgroundColor", "outlineColor", "outlineWidth",
+                    "shadowColor", "shadowOffsetX", "shadowOffsetY",
+                    "textBoxX", "textBoxY", "textBoxWidth", "textBoxHeight",
+                )
+            }
+            self.message_flags = {
+                key: tk.BooleanVar(value=bool(self.message_settings[key]))
+                for key in ("bold", "italic", "outlineEnabled", "shadowEnabled")
+            }
+            self.message_horizontal_alignment.set(
+                str(self.message_settings.get("textHorizontalAlign", "center"))
+            )
+            self.message_vertical_alignment.set(
+                str(self.message_settings.get("textVerticalAlign", "center"))
+            )
         self.background_type = tk.StringVar(
             value=str(settings.get("backgroundType", "solid"))
         )
@@ -546,6 +617,8 @@ class DisplaySettingsDialog(tk.Toplevel):
         self._layout_drag = None
         self.status_var = tk.StringVar()
         self._logo_preview_active = False
+        self._message_preview_active = False
+        self.context_style_frames = {}
 
         self._build_style_preview(frame)
 
@@ -566,12 +639,30 @@ class DisplaySettingsDialog(tk.Toplevel):
         elif self.view_type == "stage":
             upcoming_tab = self._add_scrollable_tab(notebook, "Upcoming Slides")
             self._build_upcoming_tab(upcoming_tab)
+            message_tab = self._add_scrollable_tab(notebook, "Messages")
+            self._build_message_style_tab(message_tab)
         notebook.bind("<<NotebookTabChanged>>", self._display_settings_tab_changed)
 
         for variable in self.values.values():
             variable.trace_add("write", self._draw_layout_editor)
         for variable in self.flags.values():
             variable.trace_add("write", self._draw_layout_editor)
+        if self.view_type == "stage":
+            for style_values in self.context_style_values.values():
+                for variable in style_values.values():
+                    variable.trace_add("write", self._draw_layout_editor)
+            for style_flags in self.context_style_flags.values():
+                for variable in style_flags.values():
+                    variable.trace_add("write", self._draw_layout_editor)
+            for key in ("showCurrentSongTitle", "showSectionType", "showUpcomingSongTitle"):
+                self.flags[key].trace_add("write", self._update_context_style_visibility)
+            for variable in self.message_values.values():
+                variable.trace_add("write", self._draw_layout_editor)
+            for variable in self.message_flags.values():
+                variable.trace_add("write", self._draw_layout_editor)
+            self.message_horizontal_alignment.trace_add("write", self._draw_layout_editor)
+            self.message_vertical_alignment.trace_add("write", self._draw_layout_editor)
+            self._update_context_style_visibility()
         self.next_slide_count.trace_add("write", self._draw_layout_editor)
         self.background_type.trace_add("write", self._background_type_changed)
 
@@ -580,15 +671,16 @@ class DisplaySettingsDialog(tk.Toplevel):
         )
 
     def _display_settings_tab_changed(self, _event=None):
-        if self.view_type != "live":
-            return
         try:
             title = self.settings_notebook.tab(
                 self.settings_notebook.select(), "text"
             )
         except tk.TclError:
             title = ""
-        self._logo_preview_active = title == "Church Logo"
+        if self.view_type == "live":
+            self._logo_preview_active = title == "Church Logo"
+        elif self.view_type == "stage":
+            self._message_preview_active = title == "Messages"
         self._draw_layout_editor()
 
     def _add_scrollable_tab(self, notebook, title):
@@ -658,6 +750,18 @@ class DisplaySettingsDialog(tk.Toplevel):
             ),
             fill="white",
             font=("Arial", 16, "bold"),
+        )
+        self.layout_song_title_id = self.layout_canvas.create_text(
+            0, 0, text="Amazing Grace", fill="#FFFFFF", anchor="n",
+            justify="center", state="hidden"
+        )
+        self.layout_section_type_id = self.layout_canvas.create_text(
+            0, 0, text="Verse 1", fill="#D1D5DB", anchor="n",
+            justify="center", state="hidden"
+        )
+        self.layout_upcoming_title_id = self.layout_canvas.create_text(
+            0, 0, text="Blessed Assurance", fill="#F8FAFC", anchor="n",
+            justify="center", state="hidden"
         )
         self.layout_upcoming_sample_ids = [
             self.layout_canvas.create_text(
@@ -740,6 +844,134 @@ class DisplaySettingsDialog(tk.Toplevel):
         tk.Checkbutton(
             flags, text="Italic", variable=self.flags["italic"], bg=PALETTE["surface"]
         ).pack(side="left", padx=(px(15), px(0)))
+
+        if self.view_type == "stage":
+            context = tk.LabelFrame(
+                tab,
+                text="Lyric context",
+                bg=PALETTE["surface"],
+                padx=px(10),
+                pady=px(8),
+            )
+            context.grid(
+                row=6, column=0, columnspan=2, sticky="ew", pady=(px(18), px(0))
+            )
+            tk.Checkbutton(
+                context,
+                text="Show current song title",
+                variable=self.flags["showCurrentSongTitle"],
+                bg=PALETTE["surface"],
+            ).pack(anchor="w")
+            tk.Checkbutton(
+                context,
+                text="Show section type (Verse 1, Chorus, etc.)",
+                variable=self.flags["showSectionType"],
+                bg=PALETTE["surface"],
+            ).pack(anchor="w", pady=(px(4), 0))
+            tk.Checkbutton(
+                context,
+                text="Show song title when an upcoming slide is from another song",
+                variable=self.flags["showUpcomingSongTitle"],
+                bg=PALETTE["surface"],
+            ).pack(anchor="w", pady=(px(4), 0))
+
+            self._build_context_style_editor(
+                tab, "Current song title style", "songTitleStyle", 7
+            )
+            self._build_context_style_editor(
+                tab, "Section type style", "sectionTypeStyle", 8
+            )
+            self._build_context_style_editor(
+                tab, "Next song title style", "upcomingSongTitleStyle", 9
+            )
+
+    def _build_context_style_editor(self, parent, title, style_key, row):
+        frame = tk.LabelFrame(
+            parent, text=title, bg=PALETTE["surface"], padx=px(10), pady=px(8)
+        )
+        frame.grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=(px(12), 0)
+        )
+        frame.grid_columnconfigure(1, weight=1)
+        self.context_style_frames[style_key] = frame
+        values = self.context_style_values[style_key]
+        flags = self.context_style_flags[style_key]
+        families = sorted(set(tkfont.families(self)))
+
+        tk.Label(frame, text="Font family", bg=PALETTE["surface"]).grid(
+            row=0, column=0, sticky="w", padx=(0, px(18)), pady=px(4)
+        )
+        ttk.Combobox(frame, textvariable=values["fontFamily"], values=families).grid(
+            row=0, column=1, sticky="ew", pady=px(4)
+        )
+        tk.Label(frame, text="Font size", bg=PALETTE["surface"]).grid(
+            row=1, column=0, sticky="w", padx=(0, px(18)), pady=px(4)
+        )
+        ttk.Spinbox(
+            frame, from_=10, to=160, textvariable=values["fontSize"], width=10
+        ).grid(row=1, column=1, sticky="w", pady=px(4))
+
+        tk.Label(frame, text="Text color", bg=PALETTE["surface"]).grid(
+            row=2, column=0, sticky="w", padx=(0, px(18)), pady=px(4)
+        )
+        color_holder = tk.Frame(frame, bg=PALETTE["surface"])
+        color_holder.grid(row=2, column=1, sticky="ew", pady=px(4))
+        color_holder.grid_columnconfigure(0, weight=1)
+        style_entry(
+            tk.Entry(color_holder, textvariable=values["textColor"], font=ui_font(10))
+        ).grid(row=0, column=0, sticky="ew", ipady=px(3))
+        modern_button(
+            color_holder,
+            "Choose color…",
+            lambda key=style_key: self._choose_context_style_color(key),
+            color=PALETTE["neutral"],
+            hover_color=PALETTE["neutral_hover"],
+            icon="palette",
+            compact=True,
+        ).grid(row=0, column=1, padx=(px(6), 0))
+
+        tk.Label(frame, text="Letter case", bg=PALETTE["surface"]).grid(
+            row=3, column=0, sticky="w", padx=(0, px(18)), pady=px(4)
+        )
+        ttk.Combobox(
+            frame,
+            state="readonly",
+            textvariable=values["textCase"],
+            values=("preserve", "upper", "lower"),
+            width=18,
+        ).grid(row=3, column=1, sticky="w", pady=px(4))
+
+        flag_row = tk.Frame(frame, bg=PALETTE["surface"])
+        flag_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=(px(5), 0))
+        tk.Checkbutton(
+            flag_row, text="Bold", variable=flags["bold"], bg=PALETTE["surface"]
+        ).pack(side="left")
+        tk.Checkbutton(
+            flag_row, text="Italic", variable=flags["italic"], bg=PALETTE["surface"]
+        ).pack(side="left", padx=(px(15), 0))
+
+    def _choose_context_style_color(self, style_key):
+        variable = self.context_style_values[style_key]["textColor"]
+        _rgb, selected = colorchooser.askcolor(
+            color=variable.get(), parent=self, title="Choose color"
+        )
+        if selected:
+            variable.set(selected.upper())
+
+    def _update_context_style_visibility(self, *_args):
+        if self.view_type != "stage" or not self.context_style_frames:
+            return
+        visibility = {
+            "songTitleStyle": self.flags["showCurrentSongTitle"].get(),
+            "sectionTypeStyle": self.flags["showSectionType"].get(),
+            "upcomingSongTitleStyle": self.flags["showUpcomingSongTitle"].get(),
+        }
+        for key, frame in self.context_style_frames.items():
+            if visibility.get(key, True):
+                frame.grid()
+            else:
+                frame.grid_remove()
+        self._draw_layout_editor()
 
     def _build_effects_tab(self, tab):
         tab.grid_columnconfigure(1, weight=1)
@@ -959,6 +1191,138 @@ class DisplaySettingsDialog(tk.Toplevel):
             bg=PALETTE["surface"],
             fg=PALETTE["muted"],
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(px(9), px(0)))
+
+    def _build_message_style_tab(self, tab):
+        """Edit the custom Stage View message style from the Stage View dialog."""
+        tab.grid_columnconfigure(1, weight=1)
+        tk.Label(
+            tab,
+            text="Custom message style",
+            bg=PALETTE["surface"],
+            fg=PALETTE["text"],
+            font=ui_font(12, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        tk.Label(
+            tab,
+            text=(
+                "These settings are used when Send Custom Message is active. "
+                "They are saved and synchronized with the church Stage View style."
+            ),
+            bg=PALETTE["surface"],
+            fg=PALETTE["muted"],
+            justify="left",
+            wraplength=px(650),
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(px(4), px(14)))
+
+        families = sorted(set(tkfont.families(self)))
+        tk.Label(tab, text="Font family", bg=PALETTE["surface"], fg=PALETTE["text"]).grid(
+            row=2, column=0, sticky="w", padx=(0, px(18)), pady=px(5)
+        )
+        ttk.Combobox(
+            tab, textvariable=self.message_values["fontFamily"], values=families
+        ).grid(row=2, column=1, sticky="ew", pady=px(5))
+        tk.Label(tab, text="Font size", bg=PALETTE["surface"], fg=PALETTE["text"]).grid(
+            row=3, column=0, sticky="w", padx=(0, px(18)), pady=px(5)
+        )
+        ttk.Spinbox(
+            tab, from_=12, to=160, textvariable=self.message_values["fontSize"], width=10
+        ).grid(row=3, column=1, sticky="w", pady=px(5))
+        self._message_color_row(tab, "Text color", "textColor", 4)
+        self._message_color_row(tab, "Background color", "backgroundColor", 5)
+        tk.Label(tab, text="Letter case", bg=PALETTE["surface"], fg=PALETTE["text"]).grid(
+            row=6, column=0, sticky="w", padx=(0, px(18)), pady=px(5)
+        )
+        ttk.Combobox(
+            tab,
+            state="readonly",
+            textvariable=self.message_values["textCase"],
+            values=("preserve", "upper", "lower"),
+            width=18,
+        ).grid(row=6, column=1, sticky="w", pady=px(5))
+
+        flags = tk.Frame(tab, bg=PALETTE["surface"])
+        flags.grid(row=7, column=0, columnspan=2, sticky="w", pady=(px(8), px(10)))
+        tk.Checkbutton(flags, text="Bold", variable=self.message_flags["bold"], bg=PALETTE["surface"]).pack(side="left")
+        tk.Checkbutton(flags, text="Italic", variable=self.message_flags["italic"], bg=PALETTE["surface"]).pack(side="left", padx=(px(15), 0))
+        tk.Checkbutton(flags, text="Outline", variable=self.message_flags["outlineEnabled"], bg=PALETTE["surface"]).pack(side="left", padx=(px(15), 0))
+        tk.Checkbutton(flags, text="Shadow", variable=self.message_flags["shadowEnabled"], bg=PALETTE["surface"]).pack(side="left", padx=(px(15), 0))
+
+        effects = tk.LabelFrame(tab, text="Outline & shadow", bg=PALETTE["surface"], padx=px(10), pady=px(8))
+        effects.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(px(4), px(12)))
+        effects.grid_columnconfigure(1, weight=1)
+        self._message_color_row(effects, "Outline color", "outlineColor", 0)
+        self._message_number_row(effects, "Outline width", "outlineWidth", 1, 0, 10)
+        self._message_color_row(effects, "Shadow color", "shadowColor", 2)
+        self._message_number_row(effects, "Horizontal shadow", "shadowOffsetX", 3, -20, 20)
+        self._message_number_row(effects, "Vertical shadow", "shadowOffsetY", 4, -20, 20)
+
+        position = tk.LabelFrame(tab, text="Message text box", bg=PALETTE["surface"], padx=px(10), pady=px(8))
+        position.grid(row=9, column=0, columnspan=2, sticky="ew")
+        position.grid_columnconfigure(1, weight=1)
+        for row, (label, key, minimum, maximum) in enumerate((
+            ("Left (%)", "textBoxX", 0, 95),
+            ("Top (%)", "textBoxY", 0, 95),
+            ("Width (%)", "textBoxWidth", 5, 100),
+            ("Height (%)", "textBoxHeight", 5, 100),
+        )):
+            self._message_number_row(position, label, key, row, minimum, maximum)
+
+        alignment = tk.Frame(tab, bg=PALETTE["surface"])
+        alignment.grid(row=10, column=0, columnspan=2, sticky="w", pady=(px(12), 0))
+        tk.Label(alignment, text="Alignment:", bg=PALETTE["surface"], fg=PALETTE["text"]).pack(side="left")
+        ttk.Combobox(
+            alignment,
+            state="readonly",
+            values=("left", "center", "right"),
+            textvariable=self.message_horizontal_alignment,
+            width=10,
+        ).pack(side="left", padx=(px(8), px(4)))
+        ttk.Combobox(
+            alignment,
+            state="readonly",
+            values=("top", "center", "bottom"),
+            textvariable=self.message_vertical_alignment,
+            width=10,
+        ).pack(side="left")
+
+    def _message_number_row(self, parent, label, key, row, minimum, maximum):
+        tk.Label(parent, text=label, bg=PALETTE["surface"], fg=PALETTE["text"]).grid(
+            row=row, column=0, sticky="w", padx=(0, px(18)), pady=px(4)
+        )
+        ttk.Spinbox(
+            parent,
+            from_=minimum,
+            to=maximum,
+            textvariable=self.message_values[key],
+            width=10,
+        ).grid(row=row, column=1, sticky="w", pady=px(4))
+
+    def _message_color_row(self, parent, label, key, row):
+        tk.Label(parent, text=label, bg=PALETTE["surface"], fg=PALETTE["text"]).grid(
+            row=row, column=0, sticky="w", padx=(0, px(18)), pady=px(4)
+        )
+        holder = tk.Frame(parent, bg=PALETTE["surface"])
+        holder.grid(row=row, column=1, sticky="ew", pady=px(4))
+        holder.grid_columnconfigure(0, weight=1)
+        style_entry(tk.Entry(holder, textvariable=self.message_values[key], font=ui_font(10))).grid(
+            row=0, column=0, sticky="ew", ipady=px(3)
+        )
+        modern_button(
+            holder,
+            "Choose color…",
+            lambda field=key: self._choose_message_color(field),
+            color=PALETTE["neutral"],
+            hover_color=PALETTE["neutral_hover"],
+            icon="palette",
+            compact=True,
+        ).grid(row=0, column=1, padx=(px(6), 0))
+
+    def _choose_message_color(self, key):
+        _rgb, selected = colorchooser.askcolor(
+            color=self.message_values[key].get(), parent=self, title="Choose color"
+        )
+        if selected:
+            self.message_values[key].set(selected.upper())
 
     def _build_background_tab(self, tab):
         tab.grid_columnconfigure(0, weight=1)
@@ -1328,8 +1692,147 @@ class DisplaySettingsDialog(tk.Toplevel):
             "textVerticalAlign": "center",
         }
 
+    def _context_preview_color(self, style_key, fallback):
+        try:
+            value = self.context_style_values[style_key]["textColor"].get().strip()
+            self.winfo_rgb(value)
+            return value
+        except (KeyError, tk.TclError):
+            return fallback
+
+    def _context_preview_font(self, style_key, scale=0.28):
+        values = self.context_style_values.get(style_key, {})
+        flags = self.context_style_flags.get(style_key, {})
+        family = values.get("fontFamily").get() if values.get("fontFamily") else "Arial"
+        try:
+            size = max(7, min(34, round(float(values["fontSize"].get()) * scale)))
+        except (KeyError, TypeError, ValueError):
+            size = 12
+        return (
+            family or "Arial",
+            size,
+            "bold" if flags.get("bold") and flags["bold"].get() else "normal",
+            "italic" if flags.get("italic") and flags["italic"].get() else "roman",
+        )
+
+    def _draw_message_preview(self):
+        if not self.message_values:
+            return
+        width = max(100, self.layout_canvas.winfo_width())
+        height = max(100, self.layout_canvas.winfo_height())
+        try:
+            layout = calculate_text_box_layout(
+                width,
+                height,
+                {
+                    "textBoxX": float(self.message_values["textBoxX"].get()),
+                    "textBoxY": float(self.message_values["textBoxY"].get()),
+                    "textBoxWidth": float(self.message_values["textBoxWidth"].get()),
+                    "textBoxHeight": float(self.message_values["textBoxHeight"].get()),
+                    "textHorizontalAlign": self.message_horizontal_alignment.get(),
+                    "textVerticalAlign": self.message_vertical_alignment.get(),
+                },
+            )
+        except (ValueError, KeyError):
+            return
+
+        def message_color(key, fallback):
+            try:
+                value = self.message_values[key].get().strip()
+                self.winfo_rgb(value)
+                return value
+            except (KeyError, tk.TclError):
+                return fallback
+
+        self.layout_canvas.configure(bg=message_color("backgroundColor", "#000000"))
+        self.layout_canvas.itemconfigure(self.layout_background_id, state="hidden")
+        self.layout_canvas.itemconfigure(self.layout_logo_id, state="hidden")
+        for item in (
+            self.layout_song_title_id,
+            self.layout_section_type_id,
+            self.layout_upcoming_title_id,
+            self.layout_upcoming_box_id,
+            self.layout_upcoming_handle_id,
+        ):
+            self.layout_canvas.itemconfigure(item, state="hidden")
+        for item in self.layout_upcoming_sample_ids:
+            self.layout_canvas.itemconfigure(item, state="hidden")
+
+        self.layout_canvas.coords(
+            self.layout_box_id, layout.left, layout.top, layout.right, layout.bottom
+        )
+        self.layout_canvas.itemconfigure(
+            self.layout_box_id, outline="#A855F7", state="normal"
+        )
+        self.layout_canvas.itemconfigure(self.layout_handle_id, state="hidden")
+
+        try:
+            preview_size = max(10, min(32, round(float(self.message_values["fontSize"].get()) * 0.28)))
+            outline_width = max(0, int(self.message_values["outlineWidth"].get()))
+            shadow_x = int(self.message_values["shadowOffsetX"].get())
+            shadow_y = int(self.message_values["shadowOffsetY"].get())
+        except ValueError:
+            preview_size, outline_width, shadow_x, shadow_y = 18, 0, 0, 0
+        preview_font = (
+            self.message_values["fontFamily"].get() or "Arial",
+            preview_size,
+            "bold" if self.message_flags["bold"].get() else "normal",
+            "italic" if self.message_flags["italic"].get() else "roman",
+        )
+        sample_text = apply_text_case(
+            "Service begins in 10 minutes", self.message_values["textCase"].get()
+        )
+        common = {
+            "text": sample_text,
+            "font": preview_font,
+            "justify": self.message_horizontal_alignment.get(),
+            "width": max(20, layout.text_width),
+            "anchor": layout.anchor,
+        }
+        preview_outline = max(1, round(outline_width * 0.35)) if outline_width else 0
+        offsets = (
+            (-preview_outline, 0), (preview_outline, 0),
+            (0, -preview_outline), (0, preview_outline),
+            (-preview_outline, -preview_outline), (-preview_outline, preview_outline),
+            (preview_outline, -preview_outline), (preview_outline, preview_outline),
+        )
+        for item, (dx, dy) in zip(self.layout_outline_ids, offsets):
+            self.layout_canvas.coords(item, layout.text_x + dx, layout.text_y + dy)
+            self.layout_canvas.itemconfigure(
+                item,
+                **common,
+                fill=message_color("outlineColor", "#000000"),
+                state=(
+                    "normal"
+                    if self.message_flags["outlineEnabled"].get() and preview_outline
+                    else "hidden"
+                ),
+            )
+        self.layout_canvas.coords(
+            self.layout_shadow_id,
+            layout.text_x + round(shadow_x * 0.35),
+            layout.text_y + round(shadow_y * 0.35),
+        )
+        self.layout_canvas.itemconfigure(
+            self.layout_shadow_id,
+            **common,
+            fill=message_color("shadowColor", "#000000"),
+            state="normal" if self.message_flags["shadowEnabled"].get() else "hidden",
+        )
+        self.layout_canvas.coords(self.layout_sample_id, layout.text_x, layout.text_y)
+        self.layout_canvas.itemconfigure(
+            self.layout_sample_id,
+            **common,
+            fill=message_color("textColor", "#FFFFFF"),
+            state="normal",
+        )
+        self.alignment_caption.set("Custom message preview")
+
     def _draw_layout_editor(self, *_args):
         if not hasattr(self, "layout_canvas"):
+            return
+        if self.view_type == "stage" and self._message_preview_active:
+            self._draw_message_preview()
             return
         try:
             settings = self._layout_settings()
@@ -1348,6 +1851,10 @@ class DisplaySettingsDialog(tk.Toplevel):
         self.layout_canvas.coords(
             self.layout_box_id, layout.left, layout.top, layout.right, layout.bottom
         )
+        self.layout_canvas.itemconfigure(
+            self.layout_box_id, outline="#38bdf8", state="normal"
+        )
+        self.layout_canvas.itemconfigure(self.layout_handle_id, state="normal")
         handle_size = 12
         self.layout_canvas.coords(
             self.layout_handle_id,
@@ -1421,6 +1928,85 @@ class DisplaySettingsDialog(tk.Toplevel):
         self.layout_canvas.itemconfigure(
             self.layout_sample_id, **common, fill=text_color, state="normal"
         )
+
+        if self.view_type == "stage":
+            box_height = max(20, layout.bottom - layout.top)
+            center_x = (layout.left + layout.right) / 2
+            title_values = self.context_style_values["songTitleStyle"]
+            section_values = self.context_style_values["sectionTypeStyle"]
+            title_text = apply_text_case("Amazing Grace", title_values["textCase"].get())
+            section_text = apply_text_case("Verse 1", section_values["textCase"].get())
+            self.layout_canvas.coords(
+                self.layout_song_title_id, center_x, layout.top + box_height * 0.07
+            )
+            self.layout_canvas.itemconfigure(
+                self.layout_song_title_id,
+                text=title_text,
+                fill=self._context_preview_color("songTitleStyle", "#FFFFFF"),
+                font=self._context_preview_font("songTitleStyle"),
+                width=max(20, layout.right - layout.left),
+                state=(
+                    "normal"
+                    if self.flags["showCurrentSongTitle"].get()
+                    else "hidden"
+                ),
+            )
+            self.layout_canvas.coords(
+                self.layout_section_type_id, center_x, layout.top + box_height * 0.25
+            )
+            self.layout_canvas.itemconfigure(
+                self.layout_section_type_id,
+                text=section_text,
+                fill=self._context_preview_color("sectionTypeStyle", "#D1D5DB"),
+                font=self._context_preview_font("sectionTypeStyle"),
+                width=max(20, layout.right - layout.left),
+                state=(
+                    "normal"
+                    if self.flags["showSectionType"].get()
+                    else "hidden"
+                ),
+            )
+            # Keep the lyric sample below its context headings so the preview mirrors
+            # the hosted Stage View's title -> section -> current lyrics hierarchy.
+            lyric_y = layout.top + box_height * (0.50 if (
+                self.flags["showCurrentSongTitle"].get() or self.flags["showSectionType"].get()
+            ) else 0.30)
+            stage_common = dict(common)
+            stage_common.update(
+                anchor="n", justify="center", width=max(20, layout.right - layout.left)
+            )
+            for item, (dx, dy) in zip(self.layout_outline_ids, offsets):
+                self.layout_canvas.coords(item, center_x + dx, lyric_y + dy)
+                self.layout_canvas.itemconfigure(
+                    item,
+                    **stage_common,
+                    fill=outline_color,
+                    state=(
+                        "normal"
+                        if self.flags["outlineEnabled"].get() and preview_outline
+                        else "hidden"
+                    ),
+                )
+            self.layout_canvas.coords(
+                self.layout_shadow_id,
+                center_x + round(shadow_x * 0.35),
+                lyric_y + round(shadow_y * 0.35),
+            )
+            self.layout_canvas.itemconfigure(
+                self.layout_shadow_id,
+                **stage_common,
+                fill=shadow_color,
+                state="normal" if self.flags["shadowEnabled"].get() else "hidden",
+            )
+            self.layout_canvas.coords(self.layout_sample_id, center_x, lyric_y)
+            self.layout_canvas.itemconfigure(
+                self.layout_sample_id, **stage_common, fill=text_color, state="normal"
+            )
+        else:
+            self.layout_canvas.itemconfigure(self.layout_song_title_id, state="hidden")
+            self.layout_canvas.itemconfigure(self.layout_section_type_id, state="hidden")
+            self.layout_canvas.itemconfigure(self.layout_upcoming_title_id, state="hidden")
+
         try:
             upcoming_count = max(0, min(5, int(self.next_slide_count.get())))
         except ValueError:
@@ -1459,15 +2045,26 @@ class DisplaySettingsDialog(tk.Toplevel):
                 upcoming_width = upcoming_layout.right - upcoming_layout.left
                 upcoming_height = upcoming_layout.bottom - upcoming_layout.top
                 slot_height = upcoming_height / max(1, upcoming_count)
+                item_y = upcoming_layout.top + slot_height * (index + 0.5)
+                if (
+                    self.view_type == "stage"
+                    and index == 0
+                    and self.flags.get("showUpcomingSongTitle")
+                    and self.flags["showUpcomingSongTitle"].get()
+                ):
+                    item_y += slot_height * 0.12
                 self.layout_canvas.coords(
-                    item,
-                    upcoming_layout.left + upcoming_width / 2,
-                    upcoming_layout.top + slot_height * (index + 0.5),
+                    item, upcoming_layout.left + upcoming_width / 2, item_y
                 )
+            sample_label = (
+                "First slide of next song"
+                if self.view_type == "stage" and index == 0
+                else f"Next slide {index + 1} lyrics"
+            )
             self.layout_canvas.itemconfigure(
                 item,
                 text=apply_text_case(
-                    f"Next slide {index + 1} lyrics",
+                    sample_label,
                     self.values["textCase"].get(),
                 ),
                 fill=upcoming_color,
@@ -1483,6 +2080,29 @@ class DisplaySettingsDialog(tk.Toplevel):
                 ),
                 state="normal" if visible else "hidden",
             )
+        if self.view_type == "stage" and upcoming_visible and upcoming_layout:
+            next_title_values = self.context_style_values["upcomingSongTitleStyle"]
+            first_slot_height = (upcoming_layout.bottom - upcoming_layout.top) / max(1, upcoming_count)
+            first_center_y = upcoming_layout.top + first_slot_height * 0.5
+            show_next_title = self.flags["showUpcomingSongTitle"].get()
+            self.layout_canvas.coords(
+                self.layout_upcoming_title_id,
+                (upcoming_layout.left + upcoming_layout.right) / 2,
+                max(upcoming_layout.top + 2, first_center_y - first_slot_height * 0.32),
+            )
+            self.layout_canvas.itemconfigure(
+                self.layout_upcoming_title_id,
+                text=apply_text_case(
+                    "Blessed Assurance", next_title_values["textCase"].get()
+                ),
+                fill=self._context_preview_color("upcomingSongTitleStyle", "#F8FAFC"),
+                font=self._context_preview_font("upcomingSongTitleStyle"),
+                width=max(20, upcoming_layout.right - upcoming_layout.left),
+                state="normal" if show_next_title else "hidden",
+            )
+        else:
+            self.layout_canvas.itemconfigure(self.layout_upcoming_title_id, state="hidden")
+
         if self.view_type == "live" and self._logo_preview_active:
             self._draw_layout_logo(width, height)
         else:
@@ -1728,11 +2348,22 @@ class DisplaySettingsDialog(tk.Toplevel):
             box_width = int(self.values["textBoxWidth"].get())
             box_height = int(self.values["textBoxHeight"].get())
             horizontal_alignment = self.text_horizontal_alignment.get()
+            context_styles = {}
+            if self.view_type == "stage":
+                for style_key, values in self.context_style_values.items():
+                    context_styles[style_key] = {
+                        **{key: variable.get() for key, variable in values.items()},
+                        **{
+                            key: variable.get()
+                            for key, variable in self.context_style_flags[style_key].items()
+                        },
+                    }
             self.controller.db_service.save_display_settings(
                 church_id,
                 {
                     **{key: variable.get() for key, variable in self.values.items()},
                     **{key: variable.get() for key, variable in self.flags.items()},
+                    **context_styles,
                     "textHorizontalAlign": horizontal_alignment,
                     "textVerticalAlign": self.text_vertical_alignment.get(),
                     "logoData": self.logo_data,
@@ -1763,23 +2394,50 @@ class DisplaySettingsDialog(tk.Toplevel):
                 },
                 self.view_type,
             )
+            if self.view_type == "stage" and self.message_settings is not None:
+                message_box_x = int(self.message_values["textBoxX"].get())
+                message_box_y = int(self.message_values["textBoxY"].get())
+                message_box_width = int(self.message_values["textBoxWidth"].get())
+                message_box_height = int(self.message_values["textBoxHeight"].get())
+                message_horizontal = self.message_horizontal_alignment.get()
+                self.controller.db_service.save_display_settings(
+                    church_id,
+                    {
+                        **self.message_settings,
+                        **{key: variable.get() for key, variable in self.message_values.items()},
+                        **{key: variable.get() for key, variable in self.message_flags.items()},
+                        "textHorizontalAlign": message_horizontal,
+                        "textVerticalAlign": self.message_vertical_alignment.get(),
+                        "alignment": message_horizontal,
+                        "horizontalPosition": message_box_x + message_box_width // 2,
+                        "verticalPosition": message_box_y + message_box_height // 2,
+                        "textWidth": message_box_width,
+                    },
+                    "message",
+                )
         except ValueError as exc:
             self.status_var.set(str(exc))
             return
         self.destroy()
         page = self.controller.pages["ControlCenterPage"]
         page.refresh()
+        if self.view_type in {"stage", "message"}:
+            self.controller.publish_stage_view_styles()
         page.set_status(
-            f"{self.view_label} settings saved locally — ready to sync."
+            f"{self.view_label} settings saved locally — Stage View style synchronized."
+            if self.view_type in {"stage", "message"}
+            else f"{self.view_label} settings saved locally — ready to sync."
         )
 
 
 class OutputSettingsDialog(tk.Toplevel):
+    """Show the permanent church outputs; Firebase configuration is app-managed."""
+
     def __init__(self, controller):
         super().__init__(controller)
         self.controller = controller
-        self.title("Live View and Stage View Setup")
-        fit_toplevel(self, 650, 390, 560, 360)
+        self.title("Live View and Stage View")
+        fit_toplevel(self, 720, 470, 620, 420)
         self.configure(bg=PALETTE["canvas"])
         self.transient(controller)
         self.grab_set()
@@ -1787,9 +2445,10 @@ class OutputSettingsDialog(tk.Toplevel):
         body = tk.Frame(self, bg=PALETTE["canvas"], padx=px(28), pady=px(24))
         body.pack(fill="both", expand=True)
         body.grid_columnconfigure(1, weight=1)
+
         tk.Label(
             body,
-            text="Live View and Stage View",
+            text="Live View and Firebase Stage View",
             font=ui_font(16, "bold"),
             bg=PALETTE["canvas"],
             fg=PALETTE["text"],
@@ -1797,116 +2456,85 @@ class OutputSettingsDialog(tk.Toplevel):
         tk.Label(
             body,
             text=(
-                "Live View automatically uses the first non-primary monitor. "
-                "Every presentation action also sends the cue to this church's "
-                "permanent Render Stage View. Each view has its own church style."
+                "Stage Cue automatically uses the currently selected church ID as the "
+                "permanent Firebase Stage View instance. No per-church Firebase setup or "
+                "publisher-ID copy/paste is required."
             ),
             bg=PALETTE["canvas"],
             fg=PALETTE["muted"],
             justify="left",
-            wraplength=px(570),
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(px(4), px(16)))
+            wraplength=px(650),
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(px(4), px(18)))
 
-        self.server_url = tk.StringVar(
-            value=controller.db_service.get_setting(
-                "render_server_url", controller.stage_publisher.server_url
-            )
-            or controller.stage_publisher.server_url
-        )
-        self.token = tk.StringVar(
-            value=controller.db_service.get_setting("render_control_token", "") or ""
-        )
         self.church_id = str(controller.current_session["church"]["id"])
-        for row, (label, variable, show) in enumerate(
-            (
-                ("Render server URL", self.server_url, None),
-                ("Control token", self.token, "•"),
-            ),
-            start=2,
-        ):
-            tk.Label(body, text=label, bg=PALETTE["canvas"], fg=PALETTE["text"]).grid(
-                row=row, column=0, sticky="w", padx=(px(0), px(12)), pady=px(6)
+        self.viewer_url = controller.stage_publisher.viewer_url(self.church_id)
+        rows = (
+            ("Church instance ID", self.church_id),
+            ("Realtime Database", controller.stage_publisher.database_url or "Not configured"),
+            ("Stage View URL", self.viewer_url or "Not configured"),
+        )
+        for row, (label, value) in enumerate(rows, start=2):
+            tk.Label(
+                body, text=label, bg=PALETTE["canvas"], fg=PALETTE["text"]
+            ).grid(row=row, column=0, sticky="nw", padx=(0, px(12)), pady=px(6))
+            tk.Label(
+                body,
+                text=value,
+                bg=PALETTE["surface_muted"],
+                fg=PALETTE["subtle_text"],
+                anchor="w",
+                justify="left",
+                wraplength=px(470),
+                padx=px(8),
+                pady=px(6),
+            ).grid(row=row, column=1, sticky="ew", pady=px(6))
+
+        self.status = tk.StringVar(
+            value=(
+                "Firebase publishing is automatic. The first heartbeat creates/restores "
+                "this computer's Firebase identity and registers it for the selected church."
             )
-            style_entry(tk.Entry(body, textvariable=variable, show=show, font=ui_font(10))).grid(
-                row=row, column=1, sticky="ew", ipady=px(4), pady=px(6)
-            )
-        tk.Label(body, text="Church instance ID", bg=PALETTE["canvas"], fg=PALETTE["text"]).grid(
-            row=4, column=0, sticky="w", padx=(px(0), px(12)), pady=px(6)
         )
         tk.Label(
             body,
-            text=self.church_id,
-            bg=PALETTE["surface_muted"],
-            fg=PALETTE["subtle_text"],
-            anchor="w",
-            padx=px(7),
-            pady=px(5),
-        ).grid(row=4, column=1, sticky="ew", pady=px(6))
-
-        tk.Label(
-            body,
-            text="Stage View URL:",
-            bg=PALETTE["canvas"],
-            fg=PALETTE["text"],
-        ).grid(row=5, column=0, sticky="nw", padx=(px(0), px(12)), pady=(px(12), px(0)))
-        self.viewer_url = tk.StringVar()
-        tk.Label(
-            body,
-            textvariable=self.viewer_url,
+            textvariable=self.status,
             bg=PALETTE["primary_soft"],
             fg=PALETTE["primary_soft_text"],
-            anchor="w",
             justify="left",
-            wraplength=px(410),
-            padx=px(8),
-            pady=px(6),
-        ).grid(row=5, column=1, sticky="ew", pady=(px(12), px(0)))
-        self.status = tk.StringVar()
-        tk.Label(body, textvariable=self.status, bg=PALETTE["canvas"], fg=PALETTE["warning"]).grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=(px(8), px(0))
-        )
+            wraplength=px(650),
+            padx=px(9),
+            pady=px(7),
+        ).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(px(14), 0))
 
         actions = tk.Frame(body, bg=PALETTE["canvas"])
-        actions.grid(row=7, column=0, columnspan=2, sticky="e", pady=(px(18), px(0)))
+        actions.grid(row=6, column=0, columnspan=2, sticky="e", pady=(px(18), 0))
         action_button(actions, "Open Live View", self._open_output, "#16835b").pack(
-            side="left", padx=(px(0), px(7))
+            side="left", padx=(0, px(7))
         )
         action_button(actions, "Copy Stage View URL", self._copy_viewer_url, "#536273").pack(
-            side="left", padx=(px(0), px(7))
+            side="left", padx=(0, px(7))
         )
-        action_button(actions, "Save", self._save, "#2563eb").pack(side="left")
-        self.server_url.trace_add("write", self._update_viewer_url)
-        self._update_viewer_url()
-
-    def _update_viewer_url(self, *_args):
-        server = self.server_url.get().strip().rstrip("/")
-        self.viewer_url.set(
-            f"{server}/stage-view/{quote(self.church_id, safe='')}"
-            if server
-            else "Configure a Render URL first."
+        action_button(actions, "Sync Stage Style", self._sync_style, "#7655b5").pack(
+            side="left", padx=(0, px(7))
         )
+        action_button(actions, "Close", self.destroy, "#2563eb").pack(side="left")
 
     def _copy_viewer_url(self):
-        url = self.viewer_url.get()
-        if not url.startswith(("http://", "https://")):
-            self.status.set("Configure the Render server URL first.")
+        if not self.viewer_url:
+            self.status.set("Firebase Hosting is not configured in this Stage Cue build.")
             return
         self.clipboard_clear()
-        self.clipboard_append(url)
+        self.clipboard_append(self.viewer_url)
         self.status.set("The permanent church Stage View URL was copied.")
 
     def _open_output(self):
         page = self.controller.pages["ControlCenterPage"]
         page.open_secondary_output()
-        self.status.set("Live View opened. A windowed Live View is used if no second monitor is found.")
-
-    def _save(self):
-        server = self.server_url.get().strip().rstrip("/")
-        if server and not server.startswith(("http://", "https://")):
-            self.status.set("The Render server URL must begin with http:// or https://.")
-            return
-        self.controller.configure_stage_publisher(server, self.token.get())
-        self.destroy()
-        self.controller.pages["ControlCenterPage"].set_status(
-            "Live View and Stage View connection settings saved locally."
+        self.status.set(
+            "Live View opened. A windowed Live View is used if no second monitor is found."
         )
+
+    def _sync_style(self):
+        self.controller.publish_stage_view_styles()
+        self.status.set("Stage View lyric and custom-message styles queued for Firebase.")
+

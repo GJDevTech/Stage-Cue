@@ -54,8 +54,43 @@ DEFAULT_DISPLAY_SETTINGS: dict[str, Any] = {
     "upcomingBoxHeight": 26,
 }
 
+DEFAULT_SONG_TITLE_STYLE: dict[str, Any] = {
+    "fontFamily": "Arial",
+    "fontSize": 30,
+    "bold": True,
+    "italic": False,
+    "textColor": "#FFFFFF",
+    "textCase": "preserve",
+}
+
+DEFAULT_SECTION_TYPE_STYLE: dict[str, Any] = {
+    "fontFamily": "Arial",
+    "fontSize": 23,
+    "bold": False,
+    "italic": False,
+    "textColor": "#D1D5DB",
+    "textCase": "preserve",
+}
+
+DEFAULT_UPCOMING_SONG_TITLE_STYLE: dict[str, Any] = {
+    "fontFamily": "Arial",
+    "fontSize": 24,
+    "bold": True,
+    "italic": False,
+    "textColor": "#F8FAFC",
+    "textCase": "preserve",
+}
+
 DEFAULT_STAGE_DISPLAY_SETTINGS: dict[str, Any] = {
     **DEFAULT_DISPLAY_SETTINGS,
+    # Standard Stage View layout is centered and shows song context above lyrics.
+    "textHorizontalAlign": "center",
+    "showCurrentSongTitle": True,
+    "showSectionType": True,
+    "showUpcomingSongTitle": True,
+    "songTitleStyle": dict(DEFAULT_SONG_TITLE_STYLE),
+    "sectionTypeStyle": dict(DEFAULT_SECTION_TYPE_STYLE),
+    "upcomingSongTitleStyle": dict(DEFAULT_UPCOMING_SONG_TITLE_STYLE),
     "showNextSlide": False,
     "nextSlideCount": 0,
 }
@@ -576,6 +611,24 @@ class DatabaseService:
                 raise ValueError("Slides ahead must be between 0 and 5.")
             normalized["nextSlideCount"] = next_slide_count
             normalized["showNextSlide"] = next_slide_count > 0
+            normalized["showCurrentSongTitle"] = self._as_boolean(
+                settings.get("showCurrentSongTitle", True)
+            )
+            normalized["showSectionType"] = self._as_boolean(
+                settings.get("showSectionType", True)
+            )
+            normalized["showUpcomingSongTitle"] = self._as_boolean(
+                settings.get("showUpcomingSongTitle", True)
+            )
+            normalized["songTitleStyle"] = self._normalize_context_text_style(
+                settings.get("songTitleStyle"), DEFAULT_SONG_TITLE_STYLE
+            )
+            normalized["sectionTypeStyle"] = self._normalize_context_text_style(
+                settings.get("sectionTypeStyle"), DEFAULT_SECTION_TYPE_STYLE
+            )
+            normalized["upcomingSongTitleStyle"] = self._normalize_context_text_style(
+                settings.get("upcomingSongTitleStyle"), DEFAULT_UPCOMING_SONG_TITLE_STYLE
+            )
         updated_at = utc_now()
         with self._connection() as connection:
             row = connection.execute(
@@ -627,6 +680,35 @@ class DatabaseService:
         return bool(value)
 
     @classmethod
+    def _normalize_context_text_style(
+        cls, source: Any, defaults: dict[str, Any]
+    ) -> dict[str, Any]:
+        raw = source if isinstance(source, dict) else {}
+        result = dict(defaults)
+        result.update(raw)
+        result["fontFamily"] = str(result.get("fontFamily") or defaults["fontFamily"]).strip() or defaults["fontFamily"]
+        try:
+            result["fontSize"] = int(result.get("fontSize", defaults["fontSize"]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Context font size must be a number.") from exc
+        if not 10 <= result["fontSize"] <= 160:
+            raise ValueError("Context font size must be between 10 and 160.")
+        result["bold"] = cls._as_boolean(result.get("bold", defaults.get("bold", False)))
+        result["italic"] = cls._as_boolean(result.get("italic", defaults.get("italic", False)))
+        color = str(result.get("textColor") or defaults["textColor"]).strip()
+        if len(color) != 7 or not color.startswith("#"):
+            raise ValueError("Context text color must use #RRGGBB format.")
+        try:
+            int(color[1:], 16)
+        except ValueError as exc:
+            raise ValueError("Context text color must use #RRGGBB format.") from exc
+        result["textColor"] = color.upper()
+        result["textCase"] = str(result.get("textCase", defaults.get("textCase", "preserve"))).strip().casefold()
+        if result["textCase"] not in {"preserve", "upper", "lower"}:
+            raise ValueError("Context text case must preserve, uppercase, or lowercase text.")
+        return result
+
+    @classmethod
     def _normalize_display_settings_bundle(
         cls, stored: Any
     ) -> dict[str, dict[str, Any]]:
@@ -670,6 +752,24 @@ class DatabaseService:
             next_slide_count = fallback_count
         stage["nextSlideCount"] = max(0, min(5, next_slide_count))
         stage["showNextSlide"] = stage["nextSlideCount"] > 0
+        stage["showCurrentSongTitle"] = cls._as_boolean(
+            stage_source.get("showCurrentSongTitle", True)
+        )
+        stage["showSectionType"] = cls._as_boolean(
+            stage_source.get("showSectionType", True)
+        )
+        stage["showUpcomingSongTitle"] = cls._as_boolean(
+            stage_source.get("showUpcomingSongTitle", True)
+        )
+        stage["songTitleStyle"] = cls._normalize_context_text_style(
+            stage_source.get("songTitleStyle"), DEFAULT_SONG_TITLE_STYLE
+        )
+        stage["sectionTypeStyle"] = cls._normalize_context_text_style(
+            stage_source.get("sectionTypeStyle"), DEFAULT_SECTION_TYPE_STYLE
+        )
+        stage["upcomingSongTitleStyle"] = cls._normalize_context_text_style(
+            stage_source.get("upcomingSongTitleStyle"), DEFAULT_UPCOMING_SONG_TITLE_STYLE
+        )
         return {
             "liveView": live,
             "stageView": stage,

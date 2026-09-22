@@ -11,7 +11,9 @@ from platformdirs import user_data_dir
 # secret; rotate the Atlas user immediately if a build is shared unexpectedly.
 EMBEDDED_MONGODB_URI = "mongodb+srv://stagecue_user:JvBGj1dDA7SHJJmf@stage-cue.ot2i89l.mongodb.net/?appName=Stage-Cue"
 EMBEDDED_MONGODB_DATABASE = "stagecue"
-DEFAULT_RENDER_SERVER_URL = "https://stage-server-k57b.onrender.com"
+DEFAULT_FIREBASE_DATABASE_URL = "https://stage-cue-default-rtdb.asia-southeast1.firebasedatabase.app"
+DEFAULT_FIREBASE_HOSTING_URL = "https://stage-cue.web.app"
+DEFAULT_FIREBASE_API_KEY = "AIzaSyCQ0scvGFW525i6bVWtK6w617YYvnMys6w"
 
 
 def bundled_resource_path(file_name: str) -> Path:
@@ -28,8 +30,9 @@ class AppConfig:
     local_database_path: Path
     mongodb_uri: str
     mongodb_database: str
-    render_server_url: str
-    render_control_token: str
+    firebase_database_url: str
+    firebase_hosting_url: str
+    firebase_api_key: str
 
     @classmethod
     def from_environment(cls) -> "AppConfig":
@@ -46,8 +49,13 @@ class AppConfig:
             local_database_path=data_directory / "stage_cue.sqlite3",
             mongodb_uri=EMBEDDED_MONGODB_URI,
             mongodb_database=EMBEDDED_MONGODB_DATABASE,
-            render_server_url=os.getenv(
-                "STAGE_CUE_RENDER_URL", DEFAULT_RENDER_SERVER_URL
+            firebase_database_url=os.getenv(
+                "STAGE_CUE_FIREBASE_DATABASE_URL", DEFAULT_FIREBASE_DATABASE_URL
             ),
-            render_control_token=os.getenv("STAGE_CUE_RENDER_TOKEN", ""),
+            firebase_hosting_url=os.getenv(
+                "STAGE_CUE_FIREBASE_HOSTING_URL", DEFAULT_FIREBASE_HOSTING_URL
+            ),
+            firebase_api_key=os.getenv(
+                "STAGE_CUE_FIREBASE_API_KEY", DEFAULT_FIREBASE_API_KEY
+            ),
         )

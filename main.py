@@ -17,9 +17,12 @@ def main() -> None:
     )
     auth_service = AuthService(config.google_client_config)
     sync_service = SyncService(local_db, cloud_db)
+    # Firebase is an application-level service, not a per-church user setting.
+    # The selected Stage Cue church ID chooses the permanent Stage View instance.
     stage_publisher = StagePublisher(
-        local_db.get_setting("render_server_url", config.render_server_url) or "",
-        local_db.get_setting("render_control_token", config.render_control_token) or "",
+        config.firebase_database_url,
+        config.firebase_hosting_url,
+        config.firebase_api_key,
     )
     app = App(auth_service, local_db, cloud_db, sync_service, stage_publisher)
     app.mainloop()

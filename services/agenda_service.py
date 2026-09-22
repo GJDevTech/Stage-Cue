@@ -7,8 +7,8 @@ from typing import Any
 
 
 AGENDA_FORMAT = "stage-cue-agenda"
-AGENDA_VERSION = 2
-SUPPORTED_AGENDA_VERSIONS = {1, 2}
+AGENDA_VERSION = 3
+SUPPORTED_AGENDA_VERSIONS = {1, 2, 3}
 VALID_TRANSITIONS = {"direct", "hide_text", "show_logo"}
 
 
@@ -25,7 +25,8 @@ def build_agenda_document(
 ) -> dict[str, Any]:
     serialized_items: list[dict[str, Any]] = []
     for item in items:
-        if item.get("_kind") == "bible":
+        kind = str(item.get("_kind") or "song").lower()
+        if kind == "bible":
             serialized_items.append(
                 {
                     "kind": "bible",
@@ -34,6 +35,15 @@ def build_agenda_document(
                     "translation": str(item.get("translation", "kjv")),
                     "translationName": str(item.get("translation_name", "")),
                     "verses": list(item.get("verses", [])),
+                    "transition": _transition(item.get("_transition")),
+                }
+            )
+        elif kind == "presentation":
+            serialized_items.append(
+                {
+                    "kind": "presentation",
+                    "title": str(item.get("title", "Presentation")),
+                    "path": str(item.get("path", "")),
                     "transition": _transition(item.get("_transition")),
                 }
             )
@@ -86,6 +96,19 @@ def validate_agenda_document(document: Any) -> dict[str, Any]:
                     "translation": str(item.get("translation", "kjv")),
                     "translationName": str(item.get("translationName", "")),
                     "verses": verses,
+                    "transition": _transition(item.get("transition")),
+                }
+            )
+            continue
+        if kind == "presentation":
+            path = str(item.get("path", "")).strip()
+            if not path:
+                raise ValueError("The agenda contains a presentation without a file path.")
+            normalized_items.append(
+                {
+                    "kind": "presentation",
+                    "title": str(item.get("title") or Path(path).stem or "Presentation"),
+                    "path": path,
                     "transition": _transition(item.get("transition")),
                 }
             )

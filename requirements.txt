@@ -8,3 +8,5 @@ opencv-python-headless>=4.10,<5
 pymongo>=4.10,<5
 requests>=2.32,<3
 screeninfo>=0.8,<1
+PyMuPDF>=1.26,<2
+pywin32>=306,<400; sys_platform == "win32"

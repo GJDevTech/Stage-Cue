@@ -22,6 +22,11 @@ from services.presentation_service import (
     segments_to_lyrics,
     strip_chords,
 )
+from services.presentation_import_service import (
+    ImportedPresentationSlide,
+    PresentationImportError,
+    import_presentation,
+)
 from ui.presentation_canvas import PresentationCanvasRenderer
 from ui.theme import (
     PALETTE,
@@ -107,19 +112,21 @@ class ControlCenterPage(tk.Frame):
         self.agenda_file_path: Path | None = None
         self.agenda_name = "Unsaved Agenda"
         self.agenda_dirty = False
-        self.agenda_transition_var = tk.StringVar(value="Next song")
+        self.agenda_transition_var = tk.StringVar(value="Next item")
         self._pending_agenda_transition: tuple[int, int] | None = None
 
         self.active_song_id: str | None = None
         self.active_content_kind = "song"
         self.active_bible_item: dict[str, Any] | None = None
+        self.active_presentation_item: dict[str, Any] | None = None
+        self._presentation_cache: dict[str, list[ImportedPresentationSlide]] = {}
         self.editor_segments: list[dict[str, str]] = []
         self.editor_dirty = False
         self._suppress_editor_events = False
 
-        self.slides: list[LyricSlide] = []
-        self.preview_slide: LyricSlide | None = None
-        self.live_slide: LyricSlide | None = None
+        self.slides: list[Any] = []
+        self.preview_slide: Any | None = None
+        self.live_slide: Any | None = None
         self.live_song_title = "No slide is live"
         self.live_mode = "READY"
         self.stage_mode = "READY"
@@ -247,14 +254,6 @@ class ControlCenterPage(tk.Frame):
             "purple",
             True,
             "palette",
-        ).pack(side="left", padx=(px(4), 0))
-        self._button(
-            self.admin_group,
-            "Message Style",
-            lambda: self.controller.open_display_settings("message"),
-            "purple",
-            True,
-            "message",
         ).pack(side="left", padx=(px(4), 0))
 
         self.output_group = self._toolbar_group(toolbar, "OUTPUT")
@@ -452,13 +451,16 @@ class ControlCenterPage(tk.Frame):
             transition,
             state="readonly",
             textvariable=self.agenda_transition_var,
-            values=("Next song", "Hide text", "Show logo"),
+            values=("Next item", "Hide text", "Show logo"),
             font=ui_font(9),
         )
         self.agenda_transition_combo.grid(row=0, column=1, sticky="ew")
         self.agenda_transition_combo.bind(
             "<<ComboboxSelected>>", self._agenda_transition_changed
         )
+        self._button(
+            transition, "Add PPT/PDF…", self.add_presentation_to_service, "purple", True, "plus"
+        ).grid(row=0, column=2, padx=(px(6), 0))
 
         controls = tk.Frame(panel, bg=self.COLORS["panel"], padx=px(8), pady=px(6))
         controls.grid(row=3, column=0, columnspan=2, sticky="ew")
@@ -1500,6 +1502,7 @@ class ControlCenterPage(tk.Frame):
     def _load_bible_item(self, item: dict[str, Any]):
         self.active_content_kind = "bible"
         self.active_bible_item = item
+        self.active_presentation_item = None
         self._set_editor_enabled(False)
         self.editor_state_var.set("BIBLE PASSAGE · READ ONLY")
         self._rebuild_bible_slides()
@@ -1542,6 +1545,107 @@ class ControlCenterPage(tk.Frame):
             self.preview_slide = None
             self._draw_preview()
 
+    def _make_presentation_agenda_item(
+        self, path: str, title: str | None = None, transition="direct"
+    ) -> dict[str, Any]:
+        source = str(Path(path).expanduser().resolve())
+        return {
+            "id": f"presentation:{source}",
+            "title": title or Path(source).stem or "Presentation",
+            "path": source,
+            "_kind": "presentation",
+            "_transition": transition,
+        }
+
+    def add_presentation_to_service(self):
+        selected = filedialog.askopenfilename(
+            parent=self,
+            title="Add announcement presentation",
+            filetypes=[
+                ("Presentations", "*.ppt *.pptx *.pdf"),
+                ("PowerPoint", "*.ppt *.pptx"),
+                ("PDF", "*.pdf"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not selected:
+            return
+        self.set_status("Importing presentation slides…")
+        self.update_idletasks()
+        try:
+            title, slides = import_presentation(selected)
+        except PresentationImportError as exc:
+            messagebox.showerror("Presentation Could Not Be Imported", str(exc), parent=self)
+            self.set_status(str(exc))
+            return
+        source = str(Path(selected).expanduser().resolve())
+        self._presentation_cache[source] = slides
+        item = self._make_presentation_agenda_item(source, title)
+        self.service_items.append(item)
+        self._save_service_plan()
+        self._render_service_plan(len(self.service_items) - 1)
+        self._load_presentation_item(item)
+        self.set_status(
+            f"Added '{item['title']}' ({len(slides)} slides) to the service agenda."
+        )
+
+    def _request_load_presentation_item(self, item: dict[str, Any]) -> bool:
+        if self.editor_dirty:
+            answer = messagebox.askyesnocancel(
+                "Unsaved Song Changes",
+                "Save the current song changes before opening the presentation?",
+                parent=self,
+            )
+            if answer is None:
+                return False
+            if answer and not self.save_editor():
+                return False
+        try:
+            self._load_presentation_item(item)
+        except PresentationImportError as exc:
+            messagebox.showerror("Presentation Could Not Be Opened", str(exc), parent=self)
+            self.set_status(str(exc))
+            return False
+        return True
+
+    def _load_presentation_item(self, item: dict[str, Any]) -> None:
+        source = str(Path(str(item.get("path", ""))).expanduser().resolve())
+        slides = self._presentation_cache.get(source)
+        if slides is None:
+            title, slides = import_presentation(source)
+            self._presentation_cache[source] = slides
+            if not item.get("title"):
+                item["title"] = title
+        self.active_content_kind = "presentation"
+        self.active_bible_item = None
+        self.active_presentation_item = item
+        self.active_song_id = None
+        self._set_editor_enabled(False)
+        self.editor_state_var.set("PRESENTATION · READ ONLY")
+        self.slides = list(slides)
+        self.slide_rule_var.set(
+            f"{len(self.slides)} presentation slide{'s' if len(self.slides) != 1 else ''}"
+        )
+        self._slide_labels = [
+            f"{index:02d}  {slide.label}" for index, slide in enumerate(self.slides, start=1)
+        ]
+        self._render_slide_labels()
+        if self.slides:
+            self.slide_list.selection_set(0)
+            self.slide_list.see(0)
+            self._on_slide_selected()
+        else:
+            self.preview_slide = None
+            self._draw_preview()
+
+    def _request_load_agenda_item(self, item: dict[str, Any]) -> bool:
+        kind = str(item.get("_kind") or "song")
+        if kind == "bible":
+            return self._request_load_bible_item(item)
+        if kind == "presentation":
+            return self._request_load_presentation_item(item)
+        return self._request_load_song(item["id"])
+
     # ------------------------------------------------------------------
     # Service agenda
     # ------------------------------------------------------------------
@@ -1557,14 +1661,15 @@ class ControlCenterPage(tk.Frame):
     @staticmethod
     def _agenda_transition_label(value: str) -> str:
         return {
-            "direct": "Next song",
+            "direct": "Next item",
             "hide_text": "Hide text",
             "show_logo": "Show logo",
-        }.get(value, "Next song")
+        }.get(value, "Next item")
 
     @staticmethod
     def _agenda_transition_value(label: str) -> str:
         return {
+            "Next item": "direct",
             "Next song": "direct",
             "Hide text": "hide_text",
             "Show logo": "show_logo",
@@ -1598,6 +1703,13 @@ class ControlCenterPage(tk.Frame):
         }
 
     def _serialize_service_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        if item.get("_kind") == "presentation":
+            return {
+                "kind": "presentation",
+                "title": item.get("title", "Presentation"),
+                "path": item.get("path", ""),
+                "transition": self._agenda_transition(item),
+            }
         if item.get("_kind") == "bible":
             return {
                 "kind": "bible",
@@ -1623,6 +1735,13 @@ class ControlCenterPage(tk.Frame):
             return None
         kind = str(raw.get("kind") or "song").strip().lower()
         transition = str(raw.get("transition") or "direct").strip().lower()
+        if kind == "presentation":
+            path = str(raw.get("path") or "").strip()
+            if not path:
+                return None
+            return self._make_presentation_agenda_item(
+                path, str(raw.get("title") or Path(path).stem), transition
+            )
         if kind == "bible":
             verses = raw.get("verses")
             if not isinstance(verses, list) or not verses:
@@ -1692,7 +1811,7 @@ class ControlCenterPage(tk.Frame):
         else:
             refreshed: list[dict[str, Any]] = []
             for item in self.service_items:
-                if item.get("_kind") == "bible":
+                if item.get("_kind") in {"bible", "presentation"}:
                     refreshed.append(item)
                     continue
                 song = self.song_by_id.get(str(item.get("id", "")))
@@ -1834,7 +1953,9 @@ class ControlCenterPage(tk.Frame):
         self.agenda_list.delete(0, tk.END)
         transition_marks = {"direct": "→", "hide_text": "▰", "show_logo": "◆"}
         for index, item in enumerate(self.service_items, start=1):
-            kind_mark = "✝" if item.get("_kind") == "bible" else "♪"
+            kind_mark = {"bible": "✝", "presentation": "▣"}.get(
+                item.get("_kind"), "♪"
+            )
             transition_mark = transition_marks[self._agenda_transition(item)]
             self.agenda_list.insert(
                 tk.END, f"{index:02d}  {kind_mark} {item['title']}   {transition_mark}"
@@ -1910,10 +2031,7 @@ class ControlCenterPage(tk.Frame):
             if self._pending_agenda_transition is not None:
                 self._pending_agenda_transition = None
                 self._clear_agenda_transition_visibility()
-            if item.get("_kind") == "bible":
-                self._request_load_bible_item(item)
-            else:
-                self._request_load_song(item["id"])
+            self._request_load_agenda_item(item)
 
     def _agenda_transition_changed(self, _event=None):
         selection = self.agenda_list.curselection()
@@ -1961,6 +2079,7 @@ class ControlCenterPage(tk.Frame):
             return
         self.active_content_kind = "song"
         self.active_bible_item = None
+        self.active_presentation_item = None
         self._suppress_editor_events = True
         self._set_editor_enabled(True)
         self.active_song_id = song_id
@@ -1996,6 +2115,7 @@ class ControlCenterPage(tk.Frame):
         self._suppress_editor_events = True
         self.active_content_kind = "song"
         self.active_bible_item = None
+        self.active_presentation_item = None
         self._set_editor_enabled(True)
         self.active_song_id = None
         self.title_var.set("")
@@ -2103,6 +2223,7 @@ class ControlCenterPage(tk.Frame):
         self._suppress_editor_events = True
         self.active_content_kind = "song"
         self.active_bible_item = None
+        self.active_presentation_item = None
         self._set_editor_enabled(True)
         self.active_song_id = None
         for variable in (self.title_var, self.author_var, self.copyright_var, self.ccli_var):
@@ -2144,6 +2265,8 @@ class ControlCenterPage(tk.Frame):
     # ------------------------------------------------------------------
 
     def _rebuild_slides(self):
+        if self.active_content_kind == "presentation" and self.active_presentation_item:
+            return
         if self.active_content_kind == "bible" and self.active_bible_item:
             self._rebuild_bible_slides()
             return
@@ -2377,11 +2500,7 @@ class ControlCenterPage(tk.Frame):
         self.agenda_list.selection_set(target)
         self.agenda_list.see(target)
         item = self.service_items[target]
-        loaded = (
-            self._request_load_bible_item(item)
-            if item.get("_kind") == "bible"
-            else self._request_load_song(item["id"])
-        )
+        loaded = self._request_load_agenda_item(item)
         if loaded and self.slides:
             self.agenda_transition_var.set(
                 self._agenda_transition_label(self._agenda_transition(item))
@@ -2430,6 +2549,8 @@ class ControlCenterPage(tk.Frame):
         self._draw_preview()
 
     def _current_content_title(self) -> str:
+        if self.active_content_kind == "presentation" and self.active_presentation_item:
+            return str(self.active_presentation_item.get("title") or "Presentation")
         if self.active_content_kind == "bible" and self.active_bible_item:
             return str(self.active_bible_item.get("title") or "Bible passage")
         return self.title_var.get().strip() or "Untitled"
@@ -2439,11 +2560,7 @@ class ControlCenterPage(tk.Frame):
             self.agenda_list.selection_clear(0, tk.END)
             self.agenda_list.selection_set(0)
             item = self.service_items[0]
-            loaded = (
-                self._request_load_bible_item(item)
-                if item.get("_kind") == "bible"
-                else self._request_load_song(item["id"])
-            )
+            loaded = self._request_load_agenda_item(item)
             if loaded:
                 self.presentation_active = False
                 self.output_frozen = False
@@ -2620,6 +2737,8 @@ class ControlCenterPage(tk.Frame):
         self.message_display_settings = self.db.get_display_settings(
             self.church_id(), "message"
         )
+        # Keep the hosted viewer aligned even when settings arrived through cloud sync.
+        self.controller.publish_stage_view_styles()
         # Retain the existing name for slide generation and the in-app Preview.
         self.display_settings = self.live_display_settings
         self._rebuild_slides()
@@ -2763,6 +2882,11 @@ class ControlCenterPage(tk.Frame):
             "title": title,
             "segment": segment,
             "text": cue_text,
+            "imageData": (
+                str(getattr(slide, "image_data", ""))
+                if slide and mode not in {"CLEAR", "READY"}
+                else ""
+            ),
             "nextText": (
                 self._stage_lyric_text(next_title, next_slide.label, next_slide.text)
                 if next_slide and settings.get("showNextSlide", False)
@@ -2787,17 +2911,78 @@ class ControlCenterPage(tk.Frame):
             "settings": settings,
         }
 
+    @staticmethod
+    def _stage_slide_value(slide: Any) -> str:
+        image_data = str(getattr(slide, "image_data", "") or "")
+        if image_data:
+            return image_data
+        return str(getattr(slide, "text", "") or "")
+
+    def _stage_database_payload(self) -> dict[str, Any]:
+        """Build the small, mode-specific Firebase Stage View payload."""
+
+        if self.stage_mode == "CLEAR":
+            return {}
+        if self.stage_mode == "MESSAGE":
+            return {"Message": self.stage_message} if self.stage_message else {}
+        if not self.presentation_active or self.live_slide is None:
+            return {}
+
+        image_data = str(getattr(self.live_slide, "image_data", "") or "")
+        if image_data:
+            return {"Current presentation image": image_data}
+
+        current_lyrics = str(getattr(self.live_slide, "text", "") or "")
+        if not current_lyrics:
+            return {}
+
+        current_slide: dict[str, str] = {
+            "Lyrics": current_lyrics,
+            "Song Title": str(self.live_song_title or ""),
+            "Section Type": str(getattr(self.live_slide, "label", "") or ""),
+        }
+        current_slide = {key: value for key, value in current_slide.items() if value}
+
+        try:
+            next_count = max(
+                0, min(5, int(self.stage_display_settings.get("nextSlideCount", 0)))
+            )
+        except (TypeError, ValueError):
+            next_count = 0
+
+        upcoming_payload: dict[str, dict[str, str]] = {}
+        previous_title = str(self.live_song_title or "")
+        for index, upcoming in enumerate(
+            self._upcoming_slides_after_live(next_count), start=1
+        ):
+            slide = upcoming["slide"]
+            lyrics = str(getattr(slide, "text", "") or "")
+            if not lyrics:
+                continue
+            item: dict[str, str] = {"Lyrics": lyrics}
+            title = str(upcoming.get("title") or "")
+            # Publish a title only on the first upcoming slide after a song
+            # transition. Later slides of that same song remain lyrics-only.
+            if title and title != previous_title:
+                item["Song Title"] = title
+            if title:
+                previous_title = title
+            upcoming_payload[f"Slide {index}"] = item
+
+        payload: dict[str, Any] = {"Current Slide": current_slide}
+        if upcoming_payload:
+            payload["Upcoming Slides"] = upcoming_payload
+        return payload
+
     def _publish_presented_slide(self):
-        self.controller.present_stage_cue(
-            self._presentation_cue("live"),
-            self._presentation_cue("stage"),
-        )
+        self.controller.present_live_cue(self._presentation_cue("live"))
+        self._publish_stage_view()
 
     def _publish_live_view(self):
         self.controller.present_live_cue(self._presentation_cue("live"))
 
     def _publish_stage_view(self):
-        self.controller.publish_stage_cue(self._presentation_cue("stage"))
+        self.controller.publish_stage_cue(self._stage_database_payload())
 
     # ------------------------------------------------------------------
     # Songbook and deletion/publishing actions
