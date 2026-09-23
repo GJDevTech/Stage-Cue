@@ -10,6 +10,7 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 from pymongo.server_api import ServerApi
 
 from services.db_service import DatabaseService, default_display_settings_bundle
+from services.bible_service import parse_bible_reference
 from services.errors import (
     AccountNotRegistered,
     AdminRequired,
@@ -494,6 +495,179 @@ class CloudDatabaseService:
                 },
                 upsert=True,
             )
+
+    # ------------------------------------------------------------------
+    # Shared Bible library
+    # ------------------------------------------------------------------
+
+    def list_available_bibles(
+        self, user_id: str, church_id: str
+    ) -> list[dict[str, Any]]:
+        """List Bible translations stored globally in MongoDB.
+
+        A church imports only a lightweight reference to a shared translation;
+        the scripture text itself is not duplicated for every church.
+        """
+
+        with self._database() as database:
+            self._require_membership(database, user_id, church_id)
+            imported_ids = {
+                str(item.get("bibleId", ""))
+                for item in database.churchBibleImports.find(
+                    {"churchId": church_id}, {"bibleId": 1}
+                )
+            }
+            result: list[dict[str, Any]] = []
+            for document in database.globalBibles.find(
+                {"deleted": {"$ne": True}}
+            ).sort("name", 1):
+                bible_id = str(document["_id"])
+                result.append(
+                    {
+                        "id": bible_id,
+                        "name": str(document.get("name") or bible_id),
+                        "abbreviation": str(document.get("abbreviation") or ""),
+                        "language": str(document.get("language") or ""),
+                        "imported": bible_id in imported_ids,
+                    }
+                )
+            return result
+
+    def list_church_bibles(
+        self, user_id: str, church_id: str
+    ) -> list[dict[str, Any]]:
+        with self._database() as database:
+            self._require_membership(database, user_id, church_id)
+            imports = list(database.churchBibleImports.find({"churchId": church_id}))
+            ids = [str(item.get("bibleId", "")) for item in imports if item.get("bibleId")]
+            if not ids:
+                return []
+            documents = {
+                str(item["_id"]): item
+                for item in database.globalBibles.find(
+                    {"_id": {"$in": ids}, "deleted": {"$ne": True}}
+                )
+            }
+            result = []
+            for bible_id in ids:
+                document = documents.get(bible_id)
+                if not document:
+                    continue
+                result.append(
+                    {
+                        "id": bible_id,
+                        "name": str(document.get("name") or bible_id),
+                        "abbreviation": str(document.get("abbreviation") or ""),
+                        "language": str(document.get("language") or ""),
+                    }
+                )
+            return sorted(result, key=lambda item: item["name"].casefold())
+
+    def import_bible_for_church(
+        self, user_id: str, church_id: str, bible_id: str
+    ) -> dict[str, Any]:
+        bible_id = str(bible_id).strip()
+        if not bible_id:
+            raise ValueError("Select a Bible translation first.")
+        with self._database() as database:
+            self._require_membership(database, user_id, church_id)
+            bible = database.globalBibles.find_one(
+                {"_id": bible_id, "deleted": {"$ne": True}}
+            )
+            if not bible:
+                raise ValueError("That Bible translation is no longer available.")
+            now = datetime.now(timezone.utc)
+            database.churchBibleImports.update_one(
+                {"_id": f"{church_id}:{bible_id}"},
+                {
+                    "$set": {
+                        "churchId": church_id,
+                        "bibleId": bible_id,
+                        "updatedAt": now,
+                    },
+                    "$setOnInsert": {
+                        "createdAt": now,
+                        "importedByUserId": user_id,
+                    },
+                },
+                upsert=True,
+            )
+            return {
+                "id": bible_id,
+                "name": str(bible.get("name") or bible_id),
+                "abbreviation": str(bible.get("abbreviation") or ""),
+                "language": str(bible.get("language") or ""),
+            }
+
+    def fetch_bible_passage(
+        self,
+        user_id: str,
+        church_id: str,
+        bible_id: str,
+        reference: str,
+    ) -> dict[str, Any]:
+        """Read an imported Bible passage from the shared MongoDB catalog."""
+
+        book, chapter, verse_start, verse_end = parse_bible_reference(reference)
+        bible_id = str(bible_id).strip()
+        with self._database() as database:
+            self._require_membership(database, user_id, church_id)
+            if not database.churchBibleImports.find_one(
+                {"churchId": church_id, "bibleId": bible_id}
+            ):
+                raise AuthorizationError(
+                    "Import this Bible translation into the church library first."
+                )
+            bible = database.globalBibles.find_one(
+                {"_id": bible_id, "deleted": {"$ne": True}}
+            )
+            if not bible:
+                raise ValueError("That Bible translation is unavailable.")
+            chapter_doc = database.globalBibleChapters.find_one(
+                {
+                    "bibleId": bible_id,
+                    "bookKey": book.casefold(),
+                    "chapter": chapter,
+                }
+            )
+            if not chapter_doc:
+                raise ValueError(
+                    f"{book} {chapter} is not stored for {bible.get('name', bible_id)}."
+                )
+            verses: list[dict[str, Any]] = []
+            for raw in chapter_doc.get("verses", []):
+                if not isinstance(raw, dict):
+                    continue
+                number = int(raw.get("verse", 0) or 0)
+                if verse_start is not None and number < verse_start:
+                    continue
+                if verse_end is not None and number > verse_end:
+                    continue
+                text = " ".join(str(raw.get("text", "")).split())
+                if not text:
+                    continue
+                verses.append(
+                    {
+                        "book": book,
+                        "chapter": chapter,
+                        "verse": number,
+                        "text": text,
+                    }
+                )
+            if not verses:
+                raise ValueError("No verses were found for that reference.")
+            if verse_start is None:
+                normalized_reference = f"{book} {chapter}"
+            elif verse_start == verse_end:
+                normalized_reference = f"{book} {chapter}:{verse_start}"
+            else:
+                normalized_reference = f"{book} {chapter}:{verse_start}-{verse_end}"
+            return {
+                "reference": normalized_reference,
+                "translationId": bible_id,
+                "translationName": str(bible.get("name") or bible_id),
+                "verses": verses,
+            }
 
     # ------------------------------------------------------------------
     # Church-owned data and global publishing

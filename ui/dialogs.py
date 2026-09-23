@@ -12,6 +12,7 @@ except ImportError:
     cv2 = None
 
 from services.presentation_service import apply_text_case, calculate_text_box_layout
+from services.song_import_service import SongImportError, import_song_source
 from ui.theme import (
     PALETTE,
     fit_toplevel,
@@ -288,14 +289,14 @@ class GlobalLibraryDialog(tk.Toplevel):
         self.songbooks = self.db.list_global_songbooks()
         self.songs = self.db.list_global_songs()
         self.title("Import Songs and Songbooks")
-        fit_toplevel(self, 820, 590, 680, 460)
+        fit_toplevel(self, 860, 690, 700, 520)
         self.configure(bg=PALETTE["canvas"])
         self.transient(controller)
 
         body = tk.Frame(self, bg=PALETTE["canvas"], padx=px(22), pady=px(22))
         body.pack(fill="both", expand=True)
         body.grid_columnconfigure(0, weight=1)
-        body.grid_rowconfigure(1, weight=1)
+        body.grid_rowconfigure(2, weight=1)
         self.status_var = tk.StringVar(
             value=(
                 "Imports create independent copies for the current church. "
@@ -312,8 +313,37 @@ class GlobalLibraryDialog(tk.Toplevel):
             pady=px(7),
         ).grid(row=0, column=0, sticky="ew", pady=(px(0), px(10)))
 
-        panel = AdminDialog._panel(body, "Published songbooks and songs")
-        panel.grid(row=1, column=0, sticky="nsew")
+        external_panel = AdminDialog._panel(body, "Import from other presentation software")
+        external_panel.grid(row=1, column=0, sticky="ew", pady=(px(0), px(10)))
+        external_row = tk.Frame(external_panel, bg=PALETTE["surface"])
+        external_row.pack(fill="x", padx=px(12), pady=px(10))
+        external_copy = tk.Frame(external_row, bg=PALETTE["surface"])
+        external_copy.pack(side="left", fill="x", expand=True)
+        tk.Label(
+            external_copy,
+            text="OpenSong  •  VideoPsalm  •  ProPresenter 6/7",
+            bg=PALETTE["surface"],
+            fg=PALETTE["text"],
+            font=ui_font(10, "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            external_copy,
+            text="Import one or more song files, a VideoPsalm songbook, or a folder/library of songs.",
+            bg=PALETTE["surface"],
+            fg=PALETTE["muted"],
+            font=ui_font(8),
+            anchor="w",
+        ).pack(anchor="w", pady=(px(2), 0))
+        action_button(external_row, "Import File(s)…", self.import_external_files, "#2563eb").pack(
+            side="right", padx=(px(8), 0)
+        )
+        action_button(external_row, "Import Folder…", self.import_external_folder, "#7655b5").pack(
+            side="right", padx=(px(8), 0)
+        )
+
+        panel = AdminDialog._panel(body, "Published Stage Cue songbooks and songs")
+        panel.grid(row=2, column=0, sticky="nsew")
 
         tree_frame = tk.Frame(panel, bg=PALETTE["surface"])
         tree_frame.pack(fill="both", expand=True, padx=px(10), pady=(px(8), px(5)))
@@ -396,6 +426,159 @@ class GlobalLibraryDialog(tk.Toplevel):
         action_button(
             controls, "Import Selected", self.import_selected, "#16a34a"
         ).pack(side="right")
+
+    def _unique_songbook_name(self, church_id: str, preferred: str) -> tuple[str, str | None]:
+        """Return (name, existing_id). Ask before merging into an existing book."""
+        preferred = preferred.strip() or "Imported Songs"
+        books = self.db.list_songbooks(church_id)
+        by_name = {str(book.get("name") or "").casefold(): book for book in books}
+        existing = by_name.get(preferred.casefold())
+        if not existing:
+            return preferred, None
+        merge = messagebox.askyesnocancel(
+            "Songbook already exists",
+            f'A songbook named "{preferred}" already exists.\n\n'
+            "Yes: import into the existing songbook\n"
+            "No: create a separate imported songbook\n"
+            "Cancel: stop the import",
+            parent=self,
+        )
+        if merge is None:
+            raise SongImportError("Import cancelled.")
+        if merge:
+            return preferred, str(existing["id"])
+        base = f"{preferred} (Imported)"
+        candidate = base
+        index = 2
+        names = set(by_name)
+        while candidate.casefold() in names:
+            candidate = f"{base} {index}"
+            index += 1
+        return candidate, None
+
+    def _save_imported_songbook(self, imported, *, prefer_current_for_single: bool = False) -> tuple[int, str]:
+        church_id = self.controller.current_session["church"]["id"]
+        control_center = self.controller.pages["ControlCenterPage"]
+        target_book_id = None
+        target_book_name = imported.name
+
+        # A single OpenSong/ProPresenter document behaves like "import song" and
+        # naturally lands in the songbook the operator is currently viewing.
+        if prefer_current_for_single and len(imported.songs) == 1:
+            target_book_id = control_center.selected_songbook_id()
+            if target_book_id:
+                current = next(
+                    (book for book in self.db.list_songbooks(church_id) if str(book["id"]) == str(target_book_id)),
+                    None,
+                )
+                if current:
+                    target_book_name = str(current.get("name") or imported.name)
+
+        if not target_book_id:
+            target_book_name, existing_id = self._unique_songbook_name(church_id, imported.name)
+            target_book_id = existing_id or self.db.save_songbook(church_id, target_book_name)
+
+        saved = 0
+        for song in imported.songs:
+            self.db.save_song(
+                church_id,
+                song.title,
+                song.lyrics,
+                target_book_id,
+                author=song.author,
+                copyright=song.copyright,
+                ccli_number=song.ccli_number,
+                segments=song.segments,
+            )
+            saved += 1
+        control_center.refresh()
+        return saved, target_book_name
+
+    def import_external_files(self):
+        paths = filedialog.askopenfilenames(
+            parent=self,
+            title="Import songs or songbooks",
+            filetypes=[
+                ("Supported song files", "*.xml *.ost *.json *.vpc *.pro6 *.pro *.probundle"),
+                ("OpenSong", "*.xml *.ost"),
+                ("VideoPsalm", "*.json *.vpc"),
+                ("ProPresenter", "*.pro6 *.pro *.probundle"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not paths:
+            return
+        total = 0
+        destinations: list[str] = []
+        warnings: list[str] = []
+        for raw_path in paths:
+            path = Path(raw_path)
+            self.status_var.set(f"Reading {path.name}…")
+            self.update_idletasks()
+            try:
+                imported = import_song_source(path)
+                # VideoPsalm files are songbooks. OpenSong and ProPresenter files
+                # are individual songs and use the currently selected Stage Cue book.
+                use_current = imported.source.startswith("OpenSong") or imported.source.startswith("ProPresenter")
+                count, destination = self._save_imported_songbook(
+                    imported, prefer_current_for_single=use_current
+                )
+                total += count
+                destinations.append(destination)
+                warnings.extend(imported.warnings)
+            except SongImportError as exc:
+                if str(exc) == "Import cancelled.":
+                    self.status_var.set("Import cancelled.")
+                    return
+                warnings.append(f"{path.name}: {exc}")
+            except Exception as exc:
+                warnings.append(f"{path.name}: {exc}")
+        if total:
+            destination_text = ", ".join(dict.fromkeys(destinations))
+            self.status_var.set(
+                f"Imported {total} song(s) into {destination_text}."
+                + (f" {len(warnings)} item(s) had warnings." if warnings else "")
+            )
+        elif warnings:
+            self.status_var.set(f"Nothing was imported. {warnings[0]}")
+        if warnings:
+            messagebox.showwarning(
+                "Import warnings",
+                "Some files or songs could not be imported:\n\n" + "\n".join(warnings[:12])
+                + (f"\n\n… and {len(warnings) - 12} more." if len(warnings) > 12 else ""),
+                parent=self,
+            )
+
+    def import_external_folder(self):
+        raw_path = filedialog.askdirectory(parent=self, title="Import song library folder")
+        if not raw_path:
+            return
+        path = Path(raw_path)
+        self.status_var.set(f"Scanning {path.name}…")
+        self.update_idletasks()
+        try:
+            imported = import_song_source(path)
+            count, destination = self._save_imported_songbook(imported)
+        except SongImportError as exc:
+            self.status_var.set(str(exc))
+            if str(exc) != "Import cancelled.":
+                messagebox.showerror("Import failed", str(exc), parent=self)
+            return
+        except Exception as exc:
+            self.status_var.set(f"Import failed: {exc}")
+            messagebox.showerror("Import failed", str(exc), parent=self)
+            return
+        self.status_var.set(
+            f"Imported {count} song(s) from {imported.source} into {destination}."
+            + (f" {len(imported.warnings)} item(s) had warnings." if imported.warnings else "")
+        )
+        if imported.warnings:
+            messagebox.showwarning(
+                "Import warnings",
+                "The import completed with warnings:\n\n" + "\n".join(imported.warnings[:12])
+                + (f"\n\n… and {len(imported.warnings) - 12} more." if len(imported.warnings) > 12 else ""),
+                parent=self,
+            )
 
     def selected_imports(self) -> tuple[list[dict], list[dict]]:
         selected = set(self.library_tree.selection())
@@ -505,6 +688,8 @@ class DisplaySettingsDialog(tk.Toplevel):
                 "logoY",
                 "logoWidth",
                 "maxLinesPerSlide",
+                "bibleMaxLinesPerSlide",
+                "bibleMaxCharactersPerSlide",
                 "upcomingTextColor",
                 "upcomingBoxX",
                 "upcomingBoxY",
@@ -1092,6 +1277,20 @@ class DisplaySettingsDialog(tk.Toplevel):
                 textvariable=self.values["maxLinesPerSlide"],
                 width=8,
             ).pack(side="left", padx=(px(12), px(0)))
+        if self.view_type == "stage":
+            tk.Label(
+                slides,
+                text="Bible lines per slide",
+                bg=PALETTE["surface"],
+                fg=PALETTE["text"],
+            ).pack(side="left")
+            ttk.Spinbox(
+                slides,
+                from_=1,
+                to=12,
+                textvariable=self.values["bibleMaxLinesPerSlide"],
+                width=8,
+            ).pack(side="left", padx=(px(12), px(0)))
         tk.Label(
             tab,
             text=(
@@ -1099,7 +1298,7 @@ class DisplaySettingsDialog(tk.Toplevel):
                 "applies this line limit. Set it to 2 for two-line slides."
                 if self.view_type == "live"
                 else (
-                    "Stage View uses the slides created by the Live View line limit."
+                    "Bible text wraps automatically to the Stage View text width. When the wrapped text reaches this line count, Stage Cue starts another slide; a long verse can continue across multiple slides."
                     if self.view_type == "stage"
                     else "Custom messages use this text box independently of lyric styles."
                 )

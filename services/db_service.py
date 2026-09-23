@@ -47,6 +47,8 @@ DEFAULT_DISPLAY_SETTINGS: dict[str, Any] = {
     "logoY": 5,
     "logoWidth": 20,
     "maxLinesPerSlide": 4,
+    "bibleMaxLinesPerSlide": 4,
+    "bibleMaxCharactersPerSlide": 180,  # legacy setting kept for migration
     "upcomingTextColor": "#A7B0BC",
     "upcomingBoxX": 5,
     "upcomingBoxY": 72,
@@ -802,6 +804,8 @@ class DatabaseService:
             "logoY": (0, 95, "Logo top position"),
             "logoWidth": (5, 100, "Logo width"),
             "maxLinesPerSlide": (1, 12, "Lines per slide"),
+            "bibleMaxLinesPerSlide": (1, 12, "Bible lines per slide"),
+            "bibleMaxCharactersPerSlide": (40, 1000, "Bible characters per slide"),
             "upcomingBoxX": (0, 95, "Upcoming-box left position"),
             "upcomingBoxY": (0, 95, "Upcoming-box top position"),
             "upcomingBoxWidth": (5, 100, "Upcoming-box width"),

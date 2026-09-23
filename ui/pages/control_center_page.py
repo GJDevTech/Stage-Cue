@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 from typing import Any
@@ -11,7 +12,7 @@ from services.agenda_service import (
     load_agenda_file,
     save_agenda_file,
 )
-from services.bible_service import BOOKS, TRANSLATIONS, BiblePassage, BibleService
+from services.bible_service import BOOKS, BiblePassage, BibleService, paginate_bible_verses, parse_bible_reference
 from services.presentation_service import (
     LyricSlide,
     build_segment_slides,
@@ -72,6 +73,201 @@ def fit_to_width(widget: tk.Widget, text: str, reserve: int = 0) -> str:
         else:
             high = middle - 1
     return text[:low].rstrip() + "…"
+
+
+class _SlideCueList(tk.Canvas):
+    """Scrollable, multi-line slide chooser with a Listbox-like API.
+
+    Tk's native ``Listbox`` forces every item to a single line.  Stage Cue's
+    cue list is much easier to scan when the section/part marker and the lyric
+    lines are shown as a small card, so this widget keeps the handful of
+    ``Listbox`` methods used by the control center while rendering each item as
+    a real multi-line row.
+    """
+
+    def __init__(self, parent, **kwargs):
+        super().__init__(
+            parent,
+            bg=PALETTE["surface"],
+            highlightthickness=1,
+            highlightbackground=PALETTE["border"],
+            bd=0,
+            takefocus=1,
+            **kwargs,
+        )
+        self._items: list[str] = []
+        self._rows: list[tk.Frame] = []
+        self._selected: int | None = None
+        self._inner = tk.Frame(self, bg=PALETTE["surface"])
+        self._inner_window = self.create_window(
+            (0, 0), window=self._inner, anchor="nw"
+        )
+        self._inner.bind("<Configure>", self._sync_scroll_region, add="+")
+        self.bind("<Configure>", self._fit_inner_width, add="+")
+        self.bind("<MouseWheel>", self._mousewheel, add="+")
+        self.bind("<Button-4>", lambda _event: self.yview_scroll(-3, "units"), add="+")
+        self.bind("<Button-5>", lambda _event: self.yview_scroll(3, "units"), add="+")
+
+    def _sync_scroll_region(self, _event=None):
+        self.configure(scrollregion=self.bbox("all"))
+
+    def _fit_inner_width(self, event=None):
+        width = event.width if event is not None else self.winfo_width()
+        self.itemconfigure(self._inner_window, width=max(1, width))
+        wrap = max(px(120), width - px(34))
+        for row in self._rows:
+            for child in row.winfo_children():
+                if isinstance(child, tk.Label):
+                    child.configure(wraplength=wrap)
+
+    def _mousewheel(self, event):
+        delta = int(getattr(event, "delta", 0))
+        if delta:
+            self.yview_scroll(-1 if delta > 0 else 1, "units")
+            return "break"
+        return None
+
+    def _row_colors(self, selected: bool) -> tuple[str, str, str]:
+        if selected:
+            return (
+                PALETTE.get("purple_soft", PALETTE["surface_subtle"]),
+                PALETTE.get("purple_soft_text", PALETTE["text"]),
+                PALETTE["text"],
+            )
+        return PALETTE["surface"], PALETTE["text"], PALETTE["muted"]
+
+    def _rebuild_rows(self):
+        for row in self._rows:
+            row.destroy()
+        self._rows = []
+        for index, text in enumerate(self._items):
+            lines = str(text).splitlines() or [""]
+            bg, header_fg, body_fg = self._row_colors(index == self._selected)
+            row = tk.Frame(
+                self._inner,
+                bg=bg,
+                padx=px(10),
+                pady=px(7),
+                highlightthickness=1,
+                highlightbackground=(
+                    PALETTE.get("purple", PALETTE["primary"])
+                    if index == self._selected
+                    else PALETTE["border"]
+                ),
+            )
+            row.pack(fill="x", padx=px(5), pady=(px(4), 0))
+            header = tk.Label(
+                row,
+                text=lines[0],
+                bg=bg,
+                fg=header_fg,
+                anchor="w",
+                justify="left",
+                font=ui_font(9, "bold"),
+            )
+            header.pack(fill="x", anchor="w")
+            body_labels: list[tk.Label] = []
+            for line in lines[1:]:
+                label = tk.Label(
+                    row,
+                    text=line,
+                    bg=bg,
+                    fg=body_fg,
+                    anchor="w",
+                    justify="left",
+                    font=ui_font(9),
+                )
+                label.pack(fill="x", anchor="w", pady=(px(1), 0))
+                body_labels.append(label)
+            for widget in (row, header, *body_labels):
+                widget.bind(
+                    "<Button-1>",
+                    lambda _event, item_index=index: self._click_item(item_index),
+                    add="+",
+                )
+            self._rows.append(row)
+        self._fit_inner_width()
+        self.after_idle(self._sync_scroll_region)
+
+    def _click_item(self, index: int):
+        self.focus_set()
+        self.selection_set(index)
+        self.see(index)
+        self.event_generate("<<ListboxSelect>>")
+
+    # Minimal Listbox-compatible surface used by ControlCenterPage.
+    def insert(self, index, text):  # type: ignore[override]
+        if index == tk.END or str(index).casefold() == "end":
+            self._items.append(str(text))
+        else:
+            self._items.insert(max(0, int(index)), str(text))
+        self._rebuild_rows()
+
+    def set_items(self, items):
+        self._items = [str(item) for item in items]
+        if self._selected is not None:
+            self._selected = (
+                min(self._selected, len(self._items) - 1)
+                if self._items
+                else None
+            )
+        self._rebuild_rows()
+
+    def delete(self, first, last=None):  # type: ignore[override]
+        if not self._items:
+            return
+        first_index = 0 if first in (tk.END, "end") else int(first)
+        if first in (tk.END, "end"):
+            first_index = len(self._items) - 1
+        if last in (tk.END, "end"):
+            last_index = len(self._items) - 1
+        elif last is None:
+            last_index = first_index
+        else:
+            last_index = int(last)
+        del self._items[max(0, first_index) : max(0, last_index) + 1]
+        if self._selected is not None:
+            if not self._items:
+                self._selected = None
+            elif self._selected > last_index:
+                self._selected -= last_index - first_index + 1
+            elif first_index <= self._selected <= last_index:
+                self._selected = min(first_index, len(self._items) - 1)
+        self._rebuild_rows()
+
+    def curselection(self):
+        return () if self._selected is None else (self._selected,)
+
+    def selection_set(self, index):
+        if not self._items:
+            self._selected = None
+            return
+        self._selected = max(0, min(int(index), len(self._items) - 1))
+        self._rebuild_rows()
+
+    def selection_clear(self, _first=0, _last=None):
+        self._selected = None
+        self._rebuild_rows()
+
+    def size(self):
+        return len(self._items)
+
+    def see(self, index):
+        if not self._rows:
+            return
+        index = max(0, min(int(index), len(self._rows) - 1))
+        self.update_idletasks()
+        row = self._rows[index]
+        row_top = row.winfo_y()
+        row_bottom = row_top + row.winfo_height()
+        total = max(1, self._inner.winfo_height())
+        visible_top = self.canvasy(0)
+        visible_bottom = visible_top + self.winfo_height()
+        if row_top < visible_top:
+            self.yview_moveto(row_top / total)
+        elif row_bottom > visible_bottom:
+            target = max(0, row_bottom - self.winfo_height())
+            self.yview_moveto(target / total)
 
 
 class ControlCenterPage(tk.Frame):
@@ -142,6 +338,8 @@ class ControlCenterPage(tk.Frame):
         self.bible_service = BibleService()
         self.bible_passage: BiblePassage | None = None
         self.bible_loading = False
+        self.bible_catalog_loading = False
+        self.church_bibles: list[dict[str, Any]] = []
 
         self._build_header()
         self._build_toolbar()
@@ -575,10 +773,13 @@ class ControlCenterPage(tk.Frame):
         tab.grid_rowconfigure(3, weight=1)
         tab.grid_columnconfigure(0, weight=1)
 
+        # Quick reference entry. The three-pane browser below remains the
+        # primary selection UI, while this lets an operator jump directly to
+        # a passage during a service.
         top = tk.Frame(tab, bg=self.COLORS["panel"], padx=px(8), pady=px(6))
-        top.grid(row=0, column=0, columnspan=2, sticky="ew")
+        top.grid(row=0, column=0, sticky="ew")
         top.grid_columnconfigure(0, weight=1)
-        self.bible_reference_var = tk.StringVar(value="John 3:16")
+        self.bible_reference_var = tk.StringVar(value="")
         self.bible_reference_entry = style_entry(
             tk.Entry(top, textvariable=self.bible_reference_var, font=ui_font(10))
         )
@@ -588,46 +789,94 @@ class ControlCenterPage(tk.Frame):
             row=0, column=1, padx=(px(5), 0)
         )
 
-        self.bible_translation_names = [name for name, _code in TRANSLATIONS]
-        self.bible_translation_by_name = {name: code for name, code in TRANSLATIONS}
-        self.bible_translation_var = tk.StringVar(value=self.bible_translation_names[0])
-        translation = ttk.Combobox(
+        # Translation selector/import action.
+        self.bible_translation_names: list[str] = []
+        self.bible_translation_by_name: dict[str, str] = {}
+        self.bible_translation_var = tk.StringVar(value="No Bible imported")
+        self.bible_translation_combo = ttk.Combobox(
             top,
             state="readonly",
-            values=self.bible_translation_names,
+            values=("No Bible imported",),
             textvariable=self.bible_translation_var,
             font=ui_font(8),
         )
-        translation.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(px(5), 0))
-        translation.bind("<<ComboboxSelected>>", self._bible_translation_changed)
+        self.bible_translation_combo.grid(row=1, column=0, sticky="ew", pady=(px(5), 0))
+        self.bible_translation_combo.bind("<<ComboboxSelected>>", self._bible_translation_changed)
+        self._button(
+            top, "Import Bible…", self.import_bible_from_cloud, "neutral", True, "import"
+        ).grid(row=1, column=1, padx=(px(5), 0), pady=(px(5), 0))
 
-        browse = tk.Frame(tab, bg=self.COLORS["panel"], padx=px(8), pady=px(2))
-        browse.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, px(3)))
-        browse.grid_columnconfigure(0, weight=1)
-        browse.grid_columnconfigure(1, weight=0)
-        self.bible_book_var = tk.StringVar(value=BOOKS[42][0])  # John
-        self.bible_book_combo = ttk.Combobox(
-            browse,
-            state="readonly",
-            values=[book for book, _chapters in BOOKS],
-            textvariable=self.bible_book_var,
-            font=ui_font(9),
-        )
-        self.bible_book_combo.grid(row=0, column=0, sticky="ew")
-        self.bible_book_combo.bind("<<ComboboxSelected>>", self._bible_book_changed)
-        self.bible_chapter_var = tk.StringVar(value="3")
-        self.bible_chapter_combo = ttk.Combobox(
-            browse,
-            state="readonly",
-            width=6,
-            values=[str(value) for value in range(1, 22)],
-            textvariable=self.bible_chapter_var,
-            font=ui_font(9),
-        )
-        self.bible_chapter_combo.grid(row=0, column=1, padx=(px(5), 0))
-        self.bible_chapter_combo.bind("<<ComboboxSelected>>", self._bible_chapter_changed)
+        # Testament filter, modelled after the compact VideoPsalm browser.
+        testament_bar = tk.Frame(tab, bg=self.COLORS["panel"], padx=px(8), pady=px(3))
+        testament_bar.grid(row=1, column=0, sticky="ew")
+        self.bible_testament_var = tk.StringVar(value="new")
+        for value, label in (("old", "Old Testament"), ("new", "New Testament")):
+            tk.Radiobutton(
+                testament_bar,
+                text=label,
+                variable=self.bible_testament_var,
+                value=value,
+                command=self._bible_testament_changed,
+                bg=self.COLORS["panel"],
+                fg=self.COLORS["text"],
+                activebackground=self.COLORS["panel"],
+                activeforeground=self.COLORS["text"],
+                selectcolor=self.COLORS["panel"],
+                font=ui_font(8),
+                highlightthickness=0,
+                bd=0,
+            ).pack(side="left", padx=(0, px(12)))
 
-        self.bible_status_var = tk.StringVar(value="Type a reference or choose a book and chapter.")
+        headers = tk.Frame(tab, bg=PALETTE["surface_muted"], padx=px(8), pady=(5))
+        headers.grid(row=2, column=0, sticky="ew")
+        headers.grid_columnconfigure(0, weight=3, uniform="bible_browser")
+        headers.grid_columnconfigure(1, weight=1, uniform="bible_browser")
+        headers.grid_columnconfigure(2, weight=1, uniform="bible_browser")
+        for column, text in enumerate(("BOOK", "CHAPTER", "VERSE")):
+            tk.Label(
+                headers,
+                text=text,
+                bg=PALETTE["surface_muted"],
+                fg=self.COLORS["muted"],
+                anchor="w",
+                font=ui_font(7, "bold"),
+            ).grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else px(6), 0))
+
+        browser = tk.Frame(tab, bg=self.COLORS["panel"], padx=px(8), pady=(4))
+        browser.grid(row=3, column=0, sticky="nsew")
+        browser.grid_rowconfigure(0, weight=1)
+        browser.grid_columnconfigure(0, weight=3, uniform="bible_browser")
+        browser.grid_columnconfigure(1, weight=1, uniform="bible_browser")
+        browser.grid_columnconfigure(2, weight=1, uniform="bible_browser")
+
+        self.bible_book_var = tk.StringVar(value="")
+        self.bible_chapter_var = tk.StringVar(value="")
+        self._bible_visible_books: list[str] = []
+
+        def list_pane(column: int, selectmode: str):
+            pane = tk.Frame(browser, bg=self.COLORS["panel"])
+            pane.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else px(5), 0))
+            pane.grid_rowconfigure(0, weight=1)
+            pane.grid_columnconfigure(0, weight=1)
+            lb = self._listbox(pane, font=ui_font(9), selectmode=selectmode)
+            lb.grid(row=0, column=0, sticky="nsew")
+            scroll = ttk.Scrollbar(pane, orient="vertical", command=lb.yview)
+            scroll.grid(row=0, column=1, sticky="ns")
+            lb.configure(yscrollcommand=scroll.set, exportselection=False)
+            return lb
+
+        self.bible_book_list = list_pane(0, "browse")
+        self.bible_chapter_list = list_pane(1, "browse")
+        self.bible_verse_list = list_pane(2, "extended")
+
+        self.bible_book_list.bind("<<ListboxSelect>>", self._bible_book_changed)
+        self.bible_chapter_list.bind("<<ListboxSelect>>", self._bible_chapter_changed)
+        self.bible_verse_list.bind("<<ListboxSelect>>", self._on_bible_verse_selected)
+        self.bible_verse_list.bind("<Double-Button-1>", lambda _event: self.add_bible_to_service())
+
+        self.bible_status_var = tk.StringVar(
+            value="Import a Bible translation, then choose a book, chapter, and verse."
+        )
         tk.Label(
             tab,
             textvariable=self.bible_status_var,
@@ -635,28 +884,20 @@ class ControlCenterPage(tk.Frame):
             fg=self.COLORS["muted"],
             anchor="w",
             justify="left",
-            wraplength=px(260),
+            wraplength=px(300),
             font=ui_font(8),
-        ).grid(row=2, column=0, columnspan=2, sticky="ew", padx=px(8), pady=(0, px(4)))
-
-        self.bible_verse_list = self._listbox(tab, font=ui_font(8), selectmode="extended")
-        self.bible_verse_list.grid(
-            row=3, column=0, sticky="nsew", padx=(px(8), 0), pady=(0, px(4))
-        )
-        self.bible_verse_list.bind("<<ListboxSelect>>", self._on_bible_verse_selected)
-        self.bible_verse_list.bind("<Double-Button-1>", lambda _event: self.add_bible_to_service())
-        bible_scroll = ttk.Scrollbar(tab, orient="vertical", command=self.bible_verse_list.yview)
-        bible_scroll.grid(row=3, column=1, sticky="ns", padx=(0, px(6)), pady=(0, px(4)))
-        self.bible_verse_list.configure(yscrollcommand=bible_scroll.set)
+        ).grid(row=4, column=0, sticky="ew", padx=px(8), pady=(0, px(4)))
 
         bible_actions = tk.Frame(tab, bg=self.COLORS["panel"], padx=px(8), pady=px(6))
-        bible_actions.grid(row=4, column=0, columnspan=2, sticky="ew")
+        bible_actions.grid(row=5, column=0, sticky="ew")
         self._button(
-            bible_actions, "Load chapter", self._load_selected_bible_chapter, "neutral", True, "folder"
+            bible_actions, "Reload chapter", self._load_selected_bible_chapter, "neutral", True, "folder"
         ).pack(side="left")
         self._button(
             bible_actions, "Add passage →", self.add_bible_to_service, "accent", True, "play"
         ).pack(side="right")
+
+        self._populate_bible_book_browser(load=False)
 
     def _on_library_tab_changed(self, _event=None):
         try:
@@ -664,7 +905,7 @@ class ControlCenterPage(tk.Frame):
         except tk.TclError:
             return
         if selected == "Bible" and self.bible_passage is None and not self.bible_loading:
-            self.load_bible_reference()
+            self._load_selected_bible_chapter()
 
     def _build_editor_panel(self, panel):
         self.song_editor_panel = panel
@@ -742,6 +983,16 @@ class ControlCenterPage(tk.Frame):
         self.lyrics_editor.bind("<<Modified>>", self._lyrics_modified)
         self.lyrics_editor.bind("<Control-a>", self._select_all_lyrics, add="+")
         self.lyrics_editor.bind("<Control-A>", self._select_all_lyrics, add="+")
+        # Keep ordinary editor navigation local to the lyrics editor.  These
+        # bindings deliberately win over presentation shortcuts so Home/End
+        # always behave like a text editor while the caret is here.
+        # Explicit widget bindings make Home/End reliable even when the main
+        # window also owns presentation shortcuts. Keypad Home/End are included
+        # for compact keyboards.
+        self.lyrics_editor.bind("<Home>", self._lyrics_home)
+        self.lyrics_editor.bind("<End>", self._lyrics_end)
+        self.lyrics_editor.bind("<KP_Home>", self._lyrics_home)
+        self.lyrics_editor.bind("<KP_End>", self._lyrics_end)
         try:
             self.lyrics_editor.bind("<Command-a>", self._select_all_lyrics, add="+")
         except tk.TclError:
@@ -770,7 +1021,7 @@ class ControlCenterPage(tk.Frame):
             footer, "Discard Changes", self.discard_editor_changes, "neutral", True, "clear"
         ).pack(side="right")
         self._button(
-            footer, "Save Song  Ctrl+S", self.save_editor, "success", True, "save"
+            footer, "Save Song", self.save_editor, "success", True, "save"
         ).pack(side="right", padx=(0, px(5)))
 
         for variable in (self.title_var, self.author_var, self.copyright_var, self.ccli_var):
@@ -792,17 +1043,18 @@ class ControlCenterPage(tk.Frame):
             font=ui_font(8),
         ).pack(side="right", padx=px(9))
 
-        self.slide_list = self._listbox(panel, font=ui_font(9))
+        self.slide_list = _SlideCueList(panel)
         self.slide_list.grid(row=1, column=0, sticky="nsew", padx=(px(8), 0), pady=px(8))
         self._slide_labels: list[str] = []
         self._slide_label_width: int | None = None
-        self.slide_list.bind("<Configure>", self._refit_slide_labels, add="+")
         self.slide_list.bind("<<ListboxSelect>>", self._on_slide_selected)
         self.slide_list.bind("<Down>", lambda _event: self._shortcut(self.next_live))
         self.slide_list.bind("<Next>", lambda _event: self._shortcut(self.next_live))
         self.slide_list.bind("<Up>", lambda _event: self._shortcut(self.previous_live))
         self.slide_list.bind("<Prior>", lambda _event: self._shortcut(self.previous_live))
-        self.slide_list.bind("<Home>", lambda _event: self._shortcut(self.restart_song))
+        self.slide_list.bind("<Left>", lambda _event: self._shortcut(self.previous_live))
+        self.slide_list.bind("<Right>", lambda _event: self._shortcut(self.next_live))
+        self.slide_list.bind("<Control-Home>", lambda _event: self._shortcut(self.restart_song))
         self.slide_list.bind("<plus>", lambda _event: self._shortcut(lambda: self.jump_agenda(1)))
         self.slide_list.bind("<minus>", lambda _event: self._shortcut(lambda: self.jump_agenda(-1)))
         self.slide_list.bind("<KP_Add>", lambda _event: self._shortcut(lambda: self.jump_agenda(1)))
@@ -1240,6 +1492,7 @@ class ControlCenterPage(tk.Frame):
         self._populate_library_tree()
         self._load_service_plan()
         self._apply_display_settings()
+        self._refresh_bible_catalog()
         if self.active_song_id and self.active_song_id in self.song_by_id and not self.editor_dirty:
             self._load_song(self.active_song_id)
         elif self.active_song_id not in self.song_by_id:
@@ -1351,26 +1604,220 @@ class ControlCenterPage(tk.Frame):
 
     def _selected_bible_translation(self) -> str:
         return self.bible_translation_by_name.get(
-            self.bible_translation_var.get(), "kjv"
+            self.bible_translation_var.get(), ""
+        )
+
+    def _session_user_id(self) -> str:
+        session = self.controller.current_session or {}
+        return str((session.get("user") or {}).get("id") or "")
+
+    def _refresh_bible_catalog(self):
+        if self.bible_catalog_loading or not hasattr(self, "bible_translation_combo"):
+            return
+        church_id = self.church_id()
+        user_id = self._session_user_id()
+        if not church_id or not user_id:
+            return
+        self.bible_catalog_loading = True
+
+        def success(items):
+            self.bible_catalog_loading = False
+            self.church_bibles = list(items or [])
+            previous_id = self._selected_bible_translation()
+            names: list[str] = []
+            mapping: dict[str, str] = {}
+            selected_name = ""
+            for item in self.church_bibles:
+                name = str(item.get("name") or item.get("id") or "Bible")
+                abbreviation = str(item.get("abbreviation") or "").strip()
+                label = f"{name} ({abbreviation})" if abbreviation else name
+                # Keep labels unique even if two catalog entries use the same name.
+                if label in mapping:
+                    label = f"{label} · {item.get('id')}"
+                names.append(label)
+                mapping[label] = str(item.get("id") or "")
+                if mapping[label] == previous_id:
+                    selected_name = label
+            self.bible_translation_names = names
+            self.bible_translation_by_name = mapping
+            if names:
+                self.bible_translation_combo.configure(values=names, state="readonly")
+                self.bible_translation_var.set(selected_name or names[0])
+                self.bible_status_var.set(
+                    f"{len(names)} Bible translation{'s' if len(names) != 1 else ''} imported for this church."
+                )
+            else:
+                self.bible_translation_combo.configure(values=("No Bible imported",), state="readonly")
+                self.bible_translation_var.set("No Bible imported")
+                self.bible_status_var.set("No Bible is imported for this church yet. Choose Import Bible…")
+
+        def error(exc):
+            self.bible_catalog_loading = False
+            self.bible_status_var.set(f"Could not load church Bibles: {exc}")
+
+        self.controller.run_background(
+            lambda: self.controller.cloud_service.list_church_bibles(user_id, church_id),
+            success,
+            error,
+        )
+
+    def import_bible_from_cloud(self):
+        church_id = self.church_id()
+        user_id = self._session_user_id()
+        if not church_id or not user_id:
+            return
+        self.bible_status_var.set("Loading shared Bible library…")
+
+        def success(items):
+            choices = [item for item in (items or []) if not item.get("imported")]
+            if not choices:
+                self.bible_status_var.set("All available Bible translations are already imported.")
+                return
+            popup = tk.Toplevel(self)
+            popup.title("Import Bible Translation")
+            popup.geometry(f"{px(560)}x{px(430)}")
+            popup.minsize(px(480), px(340))
+            popup.configure(bg=PALETTE["canvas"])
+            popup.transient(self)
+            popup.grab_set()
+
+            header = tk.Frame(popup, bg=PALETTE["navy"], padx=px(18), pady=px(14))
+            header.pack(fill="x")
+            tk.Label(
+                header, text="Shared Bible Library", bg=PALETTE["navy"], fg="#FFFFFF",
+                font=ui_font(15, "bold"), anchor="w"
+            ).pack(fill="x")
+            tk.Label(
+                header,
+                text="Import a MongoDB-hosted translation into this church. Scripture text stays shared; the church stores only the import link.",
+                bg=PALETTE["navy"], fg="#D7E0EA", font=ui_font(8),
+                justify="left", wraplength=px(500), anchor="w"
+            ).pack(fill="x", pady=(px(4), 0))
+            body = tk.Frame(popup, bg=PALETTE["canvas"], padx=px(14), pady=px(14))
+            body.pack(fill="both", expand=True)
+            listbox = self._listbox(body, font=ui_font(9))
+            listbox.pack(fill="both", expand=True)
+            for item in choices:
+                meta = " · ".join(part for part in (
+                    str(item.get("abbreviation") or ""), str(item.get("language") or "")
+                ) if part)
+                listbox.insert(tk.END, f"{item.get('name', item.get('id', 'Bible'))}{'  —  ' + meta if meta else ''}")
+            listbox.selection_set(0)
+
+            actions = tk.Frame(body, bg=PALETTE["canvas"])
+            actions.pack(fill="x", pady=(px(12), 0))
+
+            def do_import():
+                selection = listbox.curselection()
+                if not selection:
+                    return
+                item = choices[selection[0]]
+                popup.destroy()
+                self.bible_status_var.set(f"Importing {item.get('name', 'Bible')}…")
+
+                def imported(_result):
+                    self.bible_passage = None
+                    self._refresh_bible_catalog()
+                    self.bible_status_var.set(f"Imported {item.get('name', 'Bible')} for this church.")
+
+                self.controller.run_background(
+                    lambda: self.controller.cloud_service.import_bible_for_church(
+                        user_id, church_id, str(item.get("id") or "")
+                    ),
+                    imported,
+                    lambda exc: self.bible_status_var.set(f"Bible import failed: {exc}"),
+                )
+
+            self._button(actions, "Cancel", popup.destroy, "neutral", True, "clear").pack(side="right")
+            self._button(actions, "Import", do_import, "accent", True, "import").pack(side="right", padx=(0, px(6)))
+            listbox.bind("<Double-Button-1>", lambda _event: do_import())
+
+        self.controller.run_background(
+            lambda: self.controller.cloud_service.list_available_bibles(user_id, church_id),
+            success,
+            lambda exc: self.bible_status_var.set(f"Could not load shared Bible library: {exc}"),
         )
 
     def _bible_translation_changed(self, _event=None):
-        if self.bible_passage is not None:
-            reference = self.bible_passage.reference
-            self._fetch_bible(reference, select_all=True)
-
-    def _bible_book_changed(self, _event=None):
-        book = self.bible_book_var.get()
-        chapter_count = next(
-            (count for name, count in BOOKS if name == book), 1
-        )
-        chapters = [str(value) for value in range(1, chapter_count + 1)]
-        self.bible_chapter_combo.configure(values=chapters)
-        if self.bible_chapter_var.get() not in chapters:
-            self.bible_chapter_var.set("1")
+        self.bible_passage = None
         self._load_selected_bible_chapter()
 
+    def _bible_testament_changed(self):
+        preferred = "Genesis" if self.bible_testament_var.get() == "old" else "Matthew"
+        self._populate_bible_book_browser(preferred_book=preferred, preferred_chapter=1, load=True)
+
+    def _populate_bible_book_browser(
+        self,
+        preferred_book: str | None = None,
+        preferred_chapter: int | None = None,
+        load: bool = False,
+    ):
+        testament = self.bible_testament_var.get() if hasattr(self, "bible_testament_var") else "new"
+        source = BOOKS[:39] if testament == "old" else BOOKS[39:]
+        self._bible_visible_books = [name for name, _count in source]
+        self.bible_book_list.delete(0, tk.END)
+        for name in self._bible_visible_books:
+            self.bible_book_list.insert(tk.END, name)
+
+        target = preferred_book if preferred_book in self._bible_visible_books else None
+        if target is None and self.bible_book_var.get() in self._bible_visible_books:
+            target = self.bible_book_var.get()
+        if target is None and self._bible_visible_books:
+            target = self._bible_visible_books[0]
+        if not target:
+            return
+
+        index = self._bible_visible_books.index(target)
+        self.bible_book_list.selection_clear(0, tk.END)
+        self.bible_book_list.selection_set(index)
+        self.bible_book_list.see(index)
+        self.bible_book_var.set(target)
+        self._populate_bible_chapter_browser(preferred_chapter=preferred_chapter, load=load)
+
+    def _populate_bible_chapter_browser(
+        self, preferred_chapter: int | None = None, load: bool = False
+    ):
+        book = self.bible_book_var.get().strip()
+        chapter_count = next((count for name, count in BOOKS if name == book), 1)
+        self.bible_chapter_list.delete(0, tk.END)
+        for chapter in range(1, chapter_count + 1):
+            self.bible_chapter_list.insert(tk.END, str(chapter))
+
+        try:
+            target = int(preferred_chapter or self.bible_chapter_var.get() or 1)
+        except (TypeError, ValueError):
+            target = 1
+        target = max(1, min(chapter_count, target))
+        self.bible_chapter_var.set(str(target))
+        self.bible_chapter_list.selection_clear(0, tk.END)
+        self.bible_chapter_list.selection_set(target - 1)
+        self.bible_chapter_list.see(target - 1)
+        if load:
+            self._load_selected_bible_chapter()
+
+    def _bible_book_changed(self, _event=None):
+        selection = self.bible_book_list.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        if not 0 <= index < len(self._bible_visible_books):
+            return
+        book = self._bible_visible_books[index]
+        if book == self.bible_book_var.get() and self.bible_chapter_list.size():
+            return
+        self.bible_book_var.set(book)
+        self._populate_bible_chapter_browser(preferred_chapter=1, load=True)
+
     def _bible_chapter_changed(self, _event=None):
+        selection = self.bible_chapter_list.curselection()
+        if not selection:
+            return
+        chapter = selection[0] + 1
+        if str(chapter) == self.bible_chapter_var.get() and self.bible_passage is not None:
+            current = self.bible_passage.verses[0] if self.bible_passage.verses else {}
+            if current.get("book") == self.bible_book_var.get() and int(current.get("chapter", 0) or 0) == chapter:
+                return
+        self.bible_chapter_var.set(str(chapter))
         self._load_selected_bible_chapter()
 
     def _load_selected_bible_chapter(self):
@@ -1384,37 +1831,89 @@ class ControlCenterPage(tk.Frame):
         if not reference:
             self.bible_status_var.set("Enter a Bible reference first.")
             return
-        self._fetch_bible(reference, select_all=True)
+        try:
+            book, chapter, verse_start, verse_end = parse_bible_reference(reference)
+        except ValueError as exc:
+            self.bible_status_var.set(str(exc))
+            return
+        if verse_start is None:
+            self._fetch_bible(f"{book} {chapter}", select_all=True)
+        else:
+            self._fetch_bible(
+                f"{book} {chapter}",
+                select_all=False,
+                selected_range=(verse_start, verse_end or verse_start),
+            )
 
-    def _fetch_bible(self, reference: str, select_all: bool):
+    def _sync_bible_browser_to_passage(self, passage: BiblePassage) -> None:
+        if not passage.verses:
+            return
+        first = passage.verses[0]
+        book = str(first.get("book") or "")
+        chapter = int(first.get("chapter", 1) or 1)
+        book_names = [name for name, _count in BOOKS]
+        if book not in book_names:
+            return
+        testament = "old" if book_names.index(book) < 39 else "new"
+        if self.bible_testament_var.get() != testament:
+            self.bible_testament_var.set(testament)
+        self._populate_bible_book_browser(
+            preferred_book=book, preferred_chapter=chapter, load=False
+        )
+
+    def _fetch_bible(
+        self,
+        reference: str,
+        select_all: bool,
+        selected_range: tuple[int, int] | None = None,
+    ):
         if self.bible_loading:
             return
         self.bible_loading = True
         translation = self._selected_bible_translation()
+        if not translation:
+            self.bible_loading = False
+            self.bible_status_var.set("Import a Bible translation for this church first.")
+            return
         self.bible_status_var.set(f"Loading {reference}…")
 
-        def success(passage: BiblePassage):
+        def success(payload):
+            passage = BiblePassage(
+                reference=str(payload.get("reference") or reference),
+                translation_id=str(payload.get("translationId") or translation),
+                translation_name=str(payload.get("translationName") or translation),
+                verses=list(payload.get("verses") or []),
+            )
             self.bible_loading = False
             self.bible_passage = passage
             self.bible_reference_var.set(passage.reference)
+            self._sync_bible_browser_to_passage(passage)
+
             self.bible_verse_list.delete(0, tk.END)
             for verse in passage.verses:
-                prefix = f"{verse['verse']:>3}  "
-                self.bible_verse_list.insert(
-                    tk.END,
-                    fit_to_width(
-                        self.bible_verse_list,
-                        prefix + verse["text"],
-                        px(18),
-                    ),
-                )
+                self.bible_verse_list.insert(tk.END, str(verse["verse"]))
+
             if passage.verses:
-                if select_all:
+                self.bible_verse_list.selection_clear(0, tk.END)
+                if selected_range is not None:
+                    start_verse, end_verse = selected_range
+                    selected_any = False
+                    for index, verse in enumerate(passage.verses):
+                        number = int(verse.get("verse", 0) or 0)
+                        if start_verse <= number <= end_verse:
+                            self.bible_verse_list.selection_set(index)
+                            selected_any = True
+                    if not selected_any:
+                        self.bible_verse_list.selection_set(0)
+                elif select_all:
                     self.bible_verse_list.selection_set(0, tk.END)
                 else:
                     self.bible_verse_list.selection_set(0)
-                self.bible_verse_list.see(0)
+                selected = self.bible_verse_list.curselection()
+                if selected:
+                    self.bible_verse_list.see(selected[0])
                 self._on_bible_verse_selected()
+
             self.bible_status_var.set(
                 f"{passage.reference} · {passage.translation_name} · "
                 f"{len(passage.verses)} verse(s)"
@@ -1424,8 +1923,14 @@ class ControlCenterPage(tk.Frame):
             self.bible_loading = False
             self.bible_status_var.set(str(exc))
 
+        church_id = self.church_id()
+        user_id = self._session_user_id()
         self.controller.run_background(
-            lambda: self.bible_service.fetch(reference, translation), success, error
+            lambda: self.controller.cloud_service.fetch_bible_passage(
+                user_id, church_id, translation, reference
+            ),
+            success,
+            error,
         )
 
     def _selected_bible_verses(self) -> list[dict[str, Any]]:
@@ -1442,12 +1947,28 @@ class ControlCenterPage(tk.Frame):
     def _bible_reference_for_verses(verses: list[dict[str, Any]]) -> str:
         if not verses:
             return "Bible passage"
-        first, last = verses[0], verses[-1]
+        ordered = sorted(
+            verses,
+            key=lambda item: (
+                str(item.get("book") or ""),
+                int(item.get("chapter", 0) or 0),
+                int(item.get("verse", 0) or 0),
+            ),
+        )
+        first, last = ordered[0], ordered[-1]
         if first["book"] == last["book"] and first["chapter"] == last["chapter"]:
             base = f"{first['book']} {first['chapter']}"
-            if first["verse"] == last["verse"]:
-                return f"{base}:{first['verse']}"
-            return f"{base}:{first['verse']}-{last['verse']}"
+            numbers = sorted({int(item.get("verse", 0) or 0) for item in ordered})
+            ranges: list[str] = []
+            start = previous = numbers[0]
+            for number in numbers[1:]:
+                if number == previous + 1:
+                    previous = number
+                    continue
+                ranges.append(str(start) if start == previous else f"{start}-{previous}")
+                start = previous = number
+            ranges.append(str(start) if start == previous else f"{start}-{previous}")
+            return f"{base}:{', '.join(ranges)}"
         return (
             f"{first['book']} {first['chapter']}:{first['verse']} – "
             f"{last['book']} {last['chapter']}:{last['verse']}"
@@ -1507,6 +2028,32 @@ class ControlCenterPage(tk.Frame):
         self.editor_state_var.set("BIBLE PASSAGE · READ ONLY")
         self._rebuild_bible_slides()
 
+    def _bible_characters_per_line(self) -> int:
+        """Estimate Stage View word-wrap width for Bible pagination.
+
+        The hosted Stage View uses CSS pixel font sizes on a 16:9 surface. A
+        1280px reference width plus the configured text-box percentage gives a
+        stable estimate across output resolutions because both dimensions
+        scale together.
+        """
+
+        try:
+            font_size = int(self.stage_display_settings.get("fontSize", 54))
+        except (TypeError, ValueError):
+            font_size = 54
+        try:
+            width_percent = int(self.stage_display_settings.get("textBoxWidth", 90))
+        except (TypeError, ValueError):
+            width_percent = 90
+        font_size = max(12, min(160, font_size))
+        width_percent = max(5, min(100, width_percent))
+        usable_pixels = 1280 * (width_percent / 100.0)
+        # Average Latin glyph width is roughly 0.54em for the common fonts
+        # used by Stage Cue. The browser still performs the final pixel wrap;
+        # this estimate is only used to decide slide boundaries.
+        average_glyph_pixels = max(5.0, font_size * 0.54)
+        return max(12, min(160, int(usable_pixels / average_glyph_pixels)))
+
     def _rebuild_bible_slides(self):
         item = self.active_bible_item
         if not item:
@@ -1516,25 +2063,43 @@ class ControlCenterPage(tk.Frame):
             self.preview_slide = None
             self._draw_preview()
             return
+        try:
+            max_lines = int(
+                self.stage_display_settings.get("bibleMaxLinesPerSlide", 4)
+            )
+        except (TypeError, ValueError):
+            max_lines = 4
+        max_lines = max(1, min(12, max_lines))
+        characters_per_line = self._bible_characters_per_line()
+        pages = paginate_bible_verses(
+            list(item.get("verses", [])),
+            max_lines,
+            characters_per_line,
+        )
         slides: list[LyricSlide] = []
-        for index, verse in enumerate(item.get("verses", [])):
-            label = f"{verse.get('book', '')} {verse.get('chapter', '')}:{verse.get('verse', '')}"
+        total = len(pages)
+        for index, page in enumerate(pages, start=1):
             slides.append(
                 LyricSlide(
-                    segment_index=index,
-                    segment_label=label.strip(),
-                    part_index=1,
-                    part_count=1,
-                    text=f"{verse.get('verse', '')}  {verse.get('text', '')}".strip(),
+                    segment_index=index - 1,
+                    segment_label=str(page.get("label") or item.get("reference") or "Bible"),
+                    part_index=index,
+                    part_count=max(1, total),
+                    text=str(page.get("text") or ""),
                 )
             )
         self.slides = slides
         self.slide_rule_var.set(
-            f"{len(slides)} Bible verse{'s' if len(slides) != 1 else ''}"
+            f"Bible · {max_lines} line{'s' if max_lines != 1 else ''} per slide · auto-wrap"
         )
         self._slide_labels = [
-            f"{index:02d}  {slide.label}  ·  {slide.text}"
-            for index, slide in enumerate(slides, start=1)
+            "\n".join(
+                [
+                    f"{slide.segment_label} . {slide.part_index}/{slide.part_count}",
+                    *slide.text.splitlines(),
+                ]
+            )
+            for slide in slides
         ]
         self._render_slide_labels()
         if self.slides:
@@ -1627,7 +2192,8 @@ class ControlCenterPage(tk.Frame):
             f"{len(self.slides)} presentation slide{'s' if len(self.slides) != 1 else ''}"
         )
         self._slide_labels = [
-            f"{index:02d}  {slide.label}" for index, slide in enumerate(self.slides, start=1)
+            f"{slide.label}  ·  {index}/{len(self.slides)}"
+            for index, slide in enumerate(self.slides, start=1)
         ]
         self._render_slide_labels()
         if self.slides:
@@ -2170,6 +2736,32 @@ class ControlCenterPage(tk.Frame):
         self.lyrics_editor.see(tk.INSERT)
         return "break"
 
+    def _lyrics_home(self, event=None):
+        """Move the caret to the start of the visible editor line."""
+
+        widget = event.widget if event is not None else self.lyrics_editor
+        state = int(getattr(event, "state", 0)) if event is not None else 0
+        # Ctrl+Home/End and Shift+Home/End keep Tk's native document/selection
+        # semantics. The global presentation shortcut ignores text widgets.
+        if state & 0x0005:
+            return None
+        widget.tag_remove(tk.SEL, "1.0", tk.END)
+        widget.mark_set(tk.INSERT, widget.index(f"{tk.INSERT} display linestart"))
+        widget.see(tk.INSERT)
+        return "break"
+
+    def _lyrics_end(self, event=None):
+        """Move the caret to the end of the visible editor line."""
+
+        widget = event.widget if event is not None else self.lyrics_editor
+        state = int(getattr(event, "state", 0)) if event is not None else 0
+        if state & 0x0005:
+            return None
+        widget.tag_remove(tk.SEL, "1.0", tk.END)
+        widget.mark_set(tk.INSERT, widget.index(f"{tk.INSERT} display lineend"))
+        widget.see(tk.INSERT)
+        return "break"
+
     def _mark_editor_dirty(self):
         if self._suppress_editor_events or self.title_entry.cget("state") != "normal":
             return
@@ -2276,8 +2868,13 @@ class ControlCenterPage(tk.Frame):
         current = self.slide_list.curselection()
         selected = current[0] if current else 0
         self._slide_labels = [
-            f"{index:02d}  {slide.label}  ·  " + " / ".join(slide.text.splitlines())
-            for index, slide in enumerate(self.slides, start=1)
+            "\n".join(
+                [
+                    f"{slide.segment_label} . {slide.part_index}/{slide.part_count}",
+                    *slide.text.splitlines(),
+                ]
+            )
+            for slide in self.slides
         ]
         self._render_slide_labels()
         if self.slides:
@@ -2290,14 +2887,12 @@ class ControlCenterPage(tk.Frame):
             self._draw_preview()
 
     def _render_slide_labels(self):
-        """Redraw the cue list, eliding each row to the column's real width."""
+        """Redraw the cue list using left-aligned, multi-line cue cards."""
 
         labels = getattr(self, "_slide_labels", [])
         selection = self.slide_list.curselection()
         top = self.slide_list.yview()[0]
-        self.slide_list.delete(0, tk.END)
-        for label in labels:
-            self.slide_list.insert(tk.END, fit_to_width(self.slide_list, label, px(14)))
+        self.slide_list.set_items(labels)
         if selection:
             index = min(selection[0], max(0, self.slide_list.size() - 1))
             self.slide_list.selection_set(index)
@@ -2306,12 +2901,9 @@ class ControlCenterPage(tk.Frame):
         self._slide_label_width = self.slide_list.winfo_width()
 
     def _refit_slide_labels(self, _event=None):
-        if not getattr(self, "_slide_labels", None):
-            return
-        width = self.slide_list.winfo_width()
-        if width == getattr(self, "_slide_label_width", None):
-            return
-        self._render_slide_labels()
+        # Retained for compatibility with older saved UI rebuild paths.  The
+        # multi-line cue list wraps its labels automatically.
+        return
 
     def _on_slide_selected(self, _event=None):
         selection = self.slide_list.curselection()
@@ -3088,6 +3680,12 @@ class ControlCenterPage(tk.Frame):
 
     def _bind_shortcuts(self):
         self.controller.bind_all("<Control-f>", self._focus_search, add="+")
+        self.controller.bind_all("<Control-m>", self._message_shortcut, add="+")
+        self.controller.bind_all(
+            "<Control-l>",
+            lambda event: self._output_shortcut(event, self.clear_stage_view),
+            add="+",
+        )
         self.controller.bind_all("<Insert>", self._add_shortcut, add="+")
         self.controller.bind_all("<Pause>", self._add_shortcut, add="+")
         self.controller.bind_all("<Alt-a>", self._add_shortcut, add="+")
@@ -3100,11 +3698,29 @@ class ControlCenterPage(tk.Frame):
             ("<Control-q>", self.toggle_logo),
             ("<Prior>", self.previous_live),
             ("<Next>", self.next_live),
-            ("<Home>", self.restart_song),
+            ("<Control-Home>", self.restart_song),
         ):
             self.controller.bind_all(
                 sequence,
                 lambda event, action=command: self._output_shortcut(event, action),
+                add="+",
+            )
+        self.controller.bind_all(
+            "<Left>",
+            lambda event: self._presentation_arrow_shortcut(event, self.previous_live),
+            add="+",
+        )
+        self.controller.bind_all(
+            "<Right>",
+            lambda event: self._presentation_arrow_shortcut(event, self.next_live),
+            add="+",
+        )
+        for number in range(1, 10):
+            self.controller.bind_all(
+                f"<Control-KeyPress-{number}>",
+                lambda event, chorus_number=number: self._chorus_number_shortcut(
+                    event, chorus_number
+                ),
                 add="+",
             )
         for key in tuple("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ123456789"):
@@ -3146,6 +3762,14 @@ class ControlCenterPage(tk.Frame):
             self.add_to_service()
         return "break"
 
+    def _message_shortcut(self, event=None):
+        if not self._is_active_page() or (
+            event is not None and self._is_text_input_widget(event.widget)
+        ):
+            return None
+        self.prompt_stage_message()
+        return "break"
+
     def _active_shortcut(self, command):
         if not self._is_active_page():
             return None
@@ -3154,12 +3778,154 @@ class ControlCenterPage(tk.Frame):
 
     def save_all_local(self):
         self._save_service_plan(False)
-        if self.agenda_dirty and not self.save_agenda():
+        save_song = self.editor_dirty
+        save_agenda = self.agenda_dirty
+
+        if save_song and save_agenda:
+            choice = self._choose_save_targets()
+            if choice is None:
+                return False
+            save_song, save_agenda = choice
+
+        requested_song = save_song
+        requested_agenda = save_agenda
+        if save_song and not self.save_editor():
             return False
-        if self.editor_dirty:
-            return self.save_editor()
-        self.set_status("The agenda file and current song are saved locally.")
+        if save_agenda and not self.save_agenda():
+            return False
+        if not save_song and not save_agenda:
+            self.set_status("There are no unsaved song or agenda changes.")
+            return True
+        if requested_song and requested_agenda:
+            saved_label = "song and agenda"
+        elif requested_song:
+            saved_label = "current song"
+        else:
+            saved_label = "agenda"
+        self.set_status(f"Saved the {saved_label} locally.")
         return True
+
+    def _choose_save_targets(self) -> tuple[bool, bool] | None:
+        """Ask what Ctrl+S should save when both editor and agenda are dirty."""
+
+        popup = tk.Toplevel(self)
+        popup.title("Save Changes")
+        popup.geometry(f"{px(520)}x{px(330)}")
+        popup.resizable(False, False)
+        popup.configure(bg=PALETTE["canvas"])
+        popup.transient(self)
+        popup.grab_set()
+
+        result: dict[str, tuple[bool, bool] | None] = {"value": None}
+
+        header = tk.Frame(popup, bg=PALETTE["navy"], padx=px(20), pady=px(15))
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="Save changes",
+            bg=PALETTE["navy"],
+            fg="#FFFFFF",
+            font=ui_font(16, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            header,
+            text="You have unsaved work in both the song editor and the agenda.",
+            bg=PALETTE["navy"],
+            fg="#D7E0EA",
+            font=ui_font(9),
+            anchor="w",
+        ).pack(fill="x", pady=(px(3), 0))
+
+        body = tk.Frame(popup, bg=PALETTE["canvas"], padx=px(18), pady=px(14))
+        body.pack(fill="both", expand=True)
+
+        song_name = self.title_var.get().strip() or "Untitled song"
+        agenda_name = self.agenda_name or "Unsaved Agenda"
+        for icon, title, detail in (
+            ("♪", "Current song", song_name),
+            ("≡", "Service agenda", agenda_name),
+        ):
+            card = tk.Frame(
+                body,
+                bg=PALETTE["surface_subtle"],
+                highlightthickness=1,
+                highlightbackground=PALETTE["border"],
+                padx=px(10),
+                pady=px(8),
+            )
+            card.pack(fill="x", pady=(0, px(7)))
+            tk.Label(
+                card,
+                text=icon,
+                bg=PALETTE["surface_subtle"],
+                fg=PALETTE["primary"],
+                font=ui_font(13, "bold"),
+                width=2,
+            ).pack(side="left", anchor="n")
+            text = tk.Frame(card, bg=PALETTE["surface_subtle"])
+            text.pack(side="left", fill="x", expand=True, padx=(px(6), 0))
+            tk.Label(
+                text,
+                text=title,
+                bg=PALETTE["surface_subtle"],
+                fg=PALETTE["text"],
+                font=ui_font(9, "bold"),
+                anchor="w",
+            ).pack(fill="x")
+            tk.Label(
+                text,
+                text=detail,
+                bg=PALETTE["surface_subtle"],
+                fg=PALETTE["muted"],
+                font=ui_font(8),
+                anchor="w",
+            ).pack(fill="x")
+
+        buttons = tk.Frame(body, bg=PALETTE["canvas"])
+        buttons.pack(fill="x", pady=(px(6), 0))
+
+        def finish(value: tuple[bool, bool] | None):
+            result["value"] = value
+            popup.destroy()
+
+        self._button(
+            buttons,
+            "Save Both",
+            lambda: finish((True, True)),
+            "accent",
+            True,
+            "save",
+        ).pack(side="left")
+        self._button(
+            buttons,
+            "Song Only",
+            lambda: finish((True, False)),
+            "neutral",
+            True,
+            "save",
+        ).pack(side="left", padx=(px(6), 0))
+        self._button(
+            buttons,
+            "Agenda Only",
+            lambda: finish((False, True)),
+            "neutral",
+            True,
+            "save",
+        ).pack(side="left", padx=(px(6), 0))
+        self._button(
+            buttons,
+            "Cancel",
+            lambda: finish(None),
+            "neutral",
+            True,
+            "clear",
+        ).pack(side="right")
+
+        popup.protocol("WM_DELETE_WINDOW", lambda: finish(None))
+        popup.bind("<Escape>", lambda _event: finish(None))
+        popup.wait_window()
+        return result["value"]
 
     def _segment_shortcut(self, event, shortcut):
         # A modified word-processing shortcut such as Ctrl+A must never be
@@ -3191,8 +3957,60 @@ class ControlCenterPage(tk.Frame):
             self._cycle_custom_segment_slides(shortcut)
         return "break"
 
+    def _chorus_number_shortcut(self, event, number: int):
+        """Jump to Chorus N; repeated presses cycle split slides of that chorus."""
+
+        if (
+            not self._is_active_page()
+            or self._is_text_input_widget(event.widget)
+            or self.active_content_kind != "song"
+        ):
+            return None
+        matching_segments: set[int] = set()
+        for index, segment in enumerate(self.editor_segments):
+            if str(segment.get("type", "")).casefold() != "chorus":
+                continue
+            label = str(segment.get("label", "")).strip()
+            match = re.match(
+                r"^(?:chorus|refrain)(?:\s*(\d+))?$", label, re.IGNORECASE
+            )
+            if not match:
+                continue
+            label_number = int(match.group(1) or 1)
+            if label_number == number:
+                matching_segments.add(index)
+        matches = [
+            index
+            for index, slide in enumerate(self.slides)
+            if getattr(slide, "segment_index", -1) in matching_segments
+        ]
+        if not matches:
+            self.set_status(f"Chorus {number} is not present in the current song.")
+            return "break"
+        selection = self.slide_list.curselection()
+        current = selection[0] if selection else None
+        target = (
+            matches[(matches.index(current) + 1) % len(matches)]
+            if current in matches
+            else matches[0]
+        )
+        self._select_preview_slide(target)
+        return "break"
+
     def _output_shortcut(self, event, command):
         if not self._is_active_page() or self._is_song_editor_widget(event.widget):
+            return None
+        command()
+        return "break"
+
+    def _presentation_arrow_shortcut(self, event, command):
+        """Use Left/Right for live navigation without stealing text editing."""
+
+        if (
+            not self._is_active_page()
+            or not self.presentation_active
+            or self._is_text_input_widget(event.widget)
+        ):
             return None
         command()
         return "break"
@@ -3258,29 +4076,138 @@ class ControlCenterPage(tk.Frame):
         return "break"
 
     def show_shortcuts(self):
-        messagebox.showinfo(
-            "Stage Cue Keyboard Shortcuts",
-            "Ctrl+F   Focus the active Songs/Bible search\n"
-            "Esc   Clear song search\n"
-            "Insert / Pause / Alt+A   Add selected song or Bible passage to agenda\n"
-            "Delete   Remove selected agenda item\n"
-            "Ctrl+PageUp / Ctrl+PageDown   Reorder agenda item\n"
-            "Ctrl+S   Save the current song and agenda\n"
-            "F5   Start at the beginning of the service\n"
-            "Up / PageUp   Previous slide\n"
-            "Down / PageDown   Next slide (uses the agenda item's After transition)\n"
-            "Home   Restart the current song or Bible passage\n"
-            "+ / -   Next or previous agenda item\n"
-            "V   Next Verse slide\n"
-            "1–9   Corresponding Verse; press again for its next split slide\n"
-            "C   Chorus; press again for the next Chorus slide\n"
-            "B / P / I / T / O   Bridge / Pre-Chorus / Intro / Tag / Outro\n"
-            "Other letters   Custom segment beginning with that letter\n"
-            "Ctrl+P   Toggle Present mode on or off\n"
-            "When Present is on, navigation immediately follows live\n"
-            "Ctrl+R   Freeze or unfreeze Live View and Stage View\n"
-            "Ctrl+T   Hide or show text in Preview and Live View only\n"
-            "Ctrl+Q   Show or hide the Live View church logo\n"
-            "Stage View messages and Clear use the Stage controls\n",
-            parent=self,
-        )
+        """Open a compact, categorized keyboard-shortcut reference."""
+
+        popup = tk.Toplevel(self)
+        popup.title("Stage Cue Keyboard Shortcuts")
+        popup.geometry(f"{px(780)}x{px(610)}")
+        popup.minsize(px(660), px(500))
+        popup.configure(bg=PALETTE["canvas"])
+        popup.transient(self)
+
+        header = tk.Frame(popup, bg=PALETTE["navy"], padx=px(22), pady=px(16))
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="Keyboard Shortcuts",
+            bg=PALETTE["navy"],
+            fg="#FFFFFF",
+            font=ui_font(17, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            header,
+            text="Fast controls for presenting, song sections, editing, and the service agenda.",
+            bg=PALETTE["navy"],
+            fg="#D7E0EA",
+            font=ui_font(9),
+            anchor="w",
+        ).pack(fill="x", pady=(px(3), 0))
+
+        body = tk.Frame(popup, bg=PALETTE["canvas"], padx=px(16), pady=px(14))
+        body.pack(fill="both", expand=True)
+        notebook = ttk.Notebook(body)
+        notebook.pack(fill="both", expand=True)
+
+        groups = {
+            "Present": [
+                ("F5", "Start the service from the beginning."),
+                ("Ctrl+P", "Toggle Present mode."),
+                ("Left / Page Up", "Previous slide. Left Arrow is active while presenting."),
+                ("Right / Page Down", "Next slide. Right Arrow is active while presenting."),
+                ("Ctrl+Home", "Restart the current song or Bible passage."),
+                ("+ / −", "Next or previous agenda item."),
+                ("Ctrl+R", "Freeze or unfreeze Live View and Stage View."),
+                ("Ctrl+T", "Hide or show text in Preview and Live View."),
+                ("Ctrl+Q", "Show or hide the Live View church logo."),
+                ("Ctrl+M", "Open the custom Stage View message prompt."),
+                ("Ctrl+L", "Clear the Stage View immediately."),
+            ],
+            "Song Sections": [
+                ("V", "Next Verse slide."),
+                ("1–9", "Jump to Verse 1–9; press again for the next split slide."),
+                ("C", "Cycle through Chorus slides, including different choruses."),
+                ("Ctrl+1–9", "Jump directly to Chorus 1–9; press again for split slides."),
+                ("B", "Bridge."),
+                ("P", "Pre-Chorus."),
+                ("I", "Intro."),
+                ("T", "Tag."),
+                ("O / E", "Outro / Ending."),
+                ("Other letters", "Jump to a custom section beginning with that letter."),
+            ],
+            "Editing & Agenda": [
+                ("Home / End", "Move to the start/end of the current lyric line while editing."),
+                ("Ctrl+A", "Select all lyrics while the lyrics editor is focused."),
+                ("Ctrl+S", "Save changes. If both the song and agenda are unsaved, choose what to save first."),
+                ("Ctrl+F", "Focus the active Songs/Bible search."),
+                ("Esc", "Clear the song search."),
+                ("Insert / Pause / Alt+A", "Add the selected song or Bible passage to the agenda."),
+                ("Delete", "Remove the selected agenda item."),
+                ("Ctrl+Page Up / Down", "Move the selected agenda item earlier/later."),
+            ],
+        }
+
+        def add_tab(title: str, rows: list[tuple[str, str]]):
+            tab = tk.Frame(notebook, bg=PALETTE["surface"])
+            notebook.add(tab, text=title)
+            canvas = tk.Canvas(
+                tab,
+                bg=PALETTE["surface"],
+                bd=0,
+                highlightthickness=0,
+            )
+            scrollbar = ttk.Scrollbar(tab, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=scrollbar.set)
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+            inner = tk.Frame(canvas, bg=PALETTE["surface"], padx=px(12), pady=px(10))
+            window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+            def fit_width(event):
+                canvas.itemconfigure(window, width=max(1, event.width))
+
+            def update_scroll(_event=None):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            canvas.bind("<Configure>", fit_width, add="+")
+            inner.bind("<Configure>", update_scroll, add="+")
+
+            for shortcut, description in rows:
+                row = tk.Frame(
+                    inner,
+                    bg=PALETTE["surface_subtle"],
+                    highlightthickness=1,
+                    highlightbackground=PALETTE["border"],
+                    padx=px(10),
+                    pady=px(8),
+                )
+                row.pack(fill="x", pady=(0, px(7)))
+                key = tk.Label(
+                    row,
+                    text=shortcut,
+                    bg=PALETTE["navy"],
+                    fg="#FFFFFF",
+                    font=ui_font(9, "bold"),
+                    padx=px(8),
+                    pady=px(4),
+                )
+                key.pack(side="left", anchor="n")
+                tk.Label(
+                    row,
+                    text=description,
+                    bg=PALETTE["surface_subtle"],
+                    fg=PALETTE["text"],
+                    font=ui_font(9),
+                    justify="left",
+                    anchor="w",
+                    wraplength=px(500),
+                ).pack(side="left", fill="x", expand=True, padx=(px(12), 0))
+
+        for title, rows in groups.items():
+            add_tab(title, rows)
+
+        footer = tk.Frame(popup, bg=PALETTE["canvas"], padx=px(16), pady=(0, px(14)))
+        footer.pack(fill="x")
+        self._button(footer, "Close", popup.destroy, "neutral", True, "clear").pack(side="right")
+        popup.bind("<Escape>", lambda _event: popup.destroy())
+        popup.focus_set()
