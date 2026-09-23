@@ -634,11 +634,16 @@ class DisplaySettingsDialog(tk.Toplevel):
         super().__init__(controller)
         self.controller = controller
         requested_view = str(view_type).strip().casefold()
-        self.view_type = requested_view if requested_view in {"live", "stage", "message"} else "live"
+        self.view_type = (
+            requested_view
+            if requested_view in {"live", "stage", "message", "bible"}
+            else "live"
+        )
         self.view_label = {
             "live": "Live View",
             "stage": "Stage View",
             "message": "Custom Message",
+            "bible": "Bible View",
         }[self.view_type]
         church_id = controller.current_session["church"]["id"]
         settings = controller.db_service.get_display_settings(
@@ -816,10 +821,11 @@ class DisplaySettingsDialog(tk.Toplevel):
         self._build_text_tab(text_tab)
         self._build_effects_tab(effects_tab)
         self._build_layout_tab(layout_tab)
-        if self.view_type == "live":
+        if self.view_type in {"live", "bible"}:
             background_tab = self._add_scrollable_tab(notebook, "Background")
-            logo_tab = self._add_scrollable_tab(notebook, "Church Logo")
             self._build_background_tab(background_tab)
+        if self.view_type == "live":
+            logo_tab = self._add_scrollable_tab(notebook, "Church Logo")
             self._build_logo_tab(logo_tab)
         elif self.view_type == "stage":
             upcoming_tab = self._add_scrollable_tab(notebook, "Upcoming Slides")
@@ -931,7 +937,11 @@ class DisplaySettingsDialog(tk.Toplevel):
             text=(
                 "Service begins in 10 minutes"
                 if self.view_type == "message"
-                else "Sample song lyrics\ninside the text box"
+                else (
+                    "For God so loved the world\nthat he gave his one and only Son"
+                    if self.view_type == "bible"
+                    else "Sample song lyrics\ninside the text box"
+                )
             ),
             fill="white",
             font=("Arial", 16, "bold"),
@@ -1013,7 +1023,11 @@ class DisplaySettingsDialog(tk.Toplevel):
         ).grid(row=1, column=1, sticky="w", pady=px(5))
         self._color_row(tab, "Text fill color", "textColor", 2)
         self._color_row(tab, "Background color", "backgroundColor", 3)
-        self._label(tab, "Lyrics letter case", 4)
+        self._label(
+            tab,
+            "Bible text letter case" if self.view_type == "bible" else "Lyrics letter case",
+            4,
+        )
         ttk.Combobox(
             tab,
             state="readonly",
@@ -1264,23 +1278,16 @@ class DisplaySettingsDialog(tk.Toplevel):
             font=ui_font(9, "bold"),
         ).grid(row=3, column=0, columnspan=3, pady=(px(7), px(0)))
 
-        slides = tk.Frame(tab, bg=PALETTE["surface"])
-        slides.grid(row=2, column=0, sticky="ew", pady=(px(12), px(0)))
-        if self.view_type == "live":
-            tk.Label(
-                slides, text="Maximum lines per slide", bg=PALETTE["surface"], fg=PALETTE["text"]
-            ).pack(side="left")
-            ttk.Spinbox(
-                slides,
-                from_=1,
-                to=12,
-                textvariable=self.values["maxLinesPerSlide"],
-                width=8,
-            ).pack(side="left", padx=(px(12), px(0)))
-        if self.view_type == "stage":
+        if self.view_type in {"live", "bible"}:
+            slides = tk.Frame(tab, bg=PALETTE["surface"])
+            slides.grid(row=2, column=0, sticky="ew", pady=(px(12), px(0)))
             tk.Label(
                 slides,
-                text="Bible lines per slide",
+                text=(
+                    "Maximum Bible lines per slide"
+                    if self.view_type == "bible"
+                    else "Maximum lines per slide"
+                ),
                 bg=PALETTE["surface"],
                 fg=PALETTE["text"],
             ).pack(side="left")
@@ -1288,7 +1295,7 @@ class DisplaySettingsDialog(tk.Toplevel):
                 slides,
                 from_=1,
                 to=12,
-                textvariable=self.values["bibleMaxLinesPerSlide"],
+                textvariable=self.values["maxLinesPerSlide"],
                 width=8,
             ).pack(side="left", padx=(px(12), px(0)))
         tk.Label(
@@ -1298,9 +1305,13 @@ class DisplaySettingsDialog(tk.Toplevel):
                 "applies this line limit. Set it to 2 for two-line slides."
                 if self.view_type == "live"
                 else (
-                    "Bible text wraps automatically to the Stage View text width. When the wrapped text reaches this line count, Stage Cue starts another slide; a long verse can continue across multiple slides."
-                    if self.view_type == "stage"
-                    else "Custom messages use this text box independently of lyric styles."
+                    "Bible verses wrap automatically to this text box. Stage Cue starts a new slide when the wrapped text reaches this line limit; a long verse can continue across multiple slides."
+                    if self.view_type == "bible"
+                    else (
+                        "Bible pagination is configured separately from the Bible Style button."
+                        if self.view_type == "stage"
+                        else "Custom messages use this text box independently of lyric styles."
+                    )
                 )
             ),
             bg=PALETTE["surface"],
@@ -2075,7 +2086,11 @@ class DisplaySettingsDialog(tk.Toplevel):
             "italic" if self.flags["italic"].get() else "roman",
         )
         sample_text = apply_text_case(
-            "Sample song lyrics\ninside the text box",
+            (
+                "For God so loved the world\nthat he gave his one and only Son"
+                if self.view_type == "bible"
+                else "Sample song lyrics\ninside the text box"
+            ),
             self.values["textCase"].get(),
         )
         common = {

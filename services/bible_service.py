@@ -121,7 +121,7 @@ def paginate_bible_verses(
 ) -> list[dict[str, str]]:
     """Wrap Bible verses and split them into pages by visible line count.
 
-    ``characters_per_line`` is an estimate derived from the configured Stage
+    ``characters_per_line`` is an estimate derived from the configured Bible
     View text-box width and font size. Wrapping is always word-safe. If a
     single verse needs more lines than one page allows, it continues on the
     next page and repeats its verse number there for context.

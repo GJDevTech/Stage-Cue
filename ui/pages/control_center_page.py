@@ -97,6 +97,8 @@ class _SlideCueList(tk.Canvas):
         )
         self._items: list[str] = []
         self._rows: list[tk.Frame] = []
+        self._row_headers: list[tk.Label] = []
+        self._row_bodies: list[list[tk.Label]] = []
         self._selected: int | None = None
         self._inner = tk.Frame(self, bg=PALETTE["surface"])
         self._inner_window = self.create_window(
@@ -140,6 +142,8 @@ class _SlideCueList(tk.Canvas):
         for row in self._rows:
             row.destroy()
         self._rows = []
+        self._row_headers = []
+        self._row_bodies = []
         for index, text in enumerate(self._items):
             lines = str(text).splitlines() or [""]
             bg, header_fg, body_fg = self._row_colors(index == self._selected)
@@ -186,8 +190,31 @@ class _SlideCueList(tk.Canvas):
                     add="+",
                 )
             self._rows.append(row)
+            self._row_headers.append(header)
+            self._row_bodies.append(body_labels)
         self._fit_inner_width()
         self.after_idle(self._sync_scroll_region)
+
+    def _paint_row(self, index: int) -> None:
+        """Update one cue card without rebuilding the entire slide list."""
+
+        if not 0 <= index < len(self._rows):
+            return
+        selected = index == self._selected
+        bg, header_fg, body_fg = self._row_colors(selected)
+        row = self._rows[index]
+        row.configure(
+            bg=bg,
+            highlightbackground=(
+                PALETTE.get("purple", PALETTE["primary"])
+                if selected
+                else PALETTE["border"]
+            ),
+        )
+        header = self._row_headers[index]
+        header.configure(bg=bg, fg=header_fg)
+        for label in self._row_bodies[index]:
+            label.configure(bg=bg, fg=body_fg)
 
     def _click_item(self, index: int):
         self.focus_set()
@@ -242,12 +269,20 @@ class _SlideCueList(tk.Canvas):
         if not self._items:
             self._selected = None
             return
-        self._selected = max(0, min(int(index), len(self._items) - 1))
-        self._rebuild_rows()
+        previous = self._selected
+        selected = max(0, min(int(index), len(self._items) - 1))
+        if previous == selected:
+            return
+        self._selected = selected
+        if previous is not None:
+            self._paint_row(previous)
+        self._paint_row(selected)
 
     def selection_clear(self, _first=0, _last=None):
+        previous = self._selected
         self._selected = None
-        self._rebuild_rows()
+        if previous is not None:
+            self._paint_row(previous)
 
     def size(self):
         return len(self._items)
@@ -334,6 +369,7 @@ class ControlCenterPage(tk.Frame):
         self.live_display_settings: dict[str, Any] = {}
         self.stage_display_settings: dict[str, Any] = {}
         self.message_display_settings: dict[str, Any] = {}
+        self.bible_display_settings: dict[str, Any] = {}
         self.display_settings: dict[str, Any] = {}
         self.bible_service = BibleService()
         self.bible_passage: BiblePassage | None = None
@@ -449,6 +485,14 @@ class ControlCenterPage(tk.Frame):
             self.admin_group,
             "Stage Style",
             lambda: self.controller.open_display_settings("stage"),
+            "purple",
+            True,
+            "palette",
+        ).pack(side="left", padx=(px(4), 0))
+        self._button(
+            self.admin_group,
+            "Bible Style",
+            lambda: self.controller.open_display_settings("bible"),
             "purple",
             True,
             "palette",
@@ -993,6 +1037,10 @@ class ControlCenterPage(tk.Frame):
         self.lyrics_editor.bind("<End>", self._lyrics_end)
         self.lyrics_editor.bind("<KP_Home>", self._lyrics_home)
         self.lyrics_editor.bind("<KP_End>", self._lyrics_end)
+        self.lyrics_editor.bind("<Shift-Home>", self._lyrics_shift_home)
+        self.lyrics_editor.bind("<Shift-End>", self._lyrics_shift_end)
+        self.lyrics_editor.bind("<Shift-KP_Home>", self._lyrics_shift_home)
+        self.lyrics_editor.bind("<Shift-KP_End>", self._lyrics_shift_end)
         try:
             self.lyrics_editor.bind("<Command-a>", self._select_all_lyrics, add="+")
         except tk.TclError:
@@ -2029,20 +2077,20 @@ class ControlCenterPage(tk.Frame):
         self._rebuild_bible_slides()
 
     def _bible_characters_per_line(self) -> int:
-        """Estimate Stage View word-wrap width for Bible pagination.
+        """Estimate Bible View word-wrap width for Bible pagination.
 
-        The hosted Stage View uses CSS pixel font sizes on a 16:9 surface. A
-        1280px reference width plus the configured text-box percentage gives a
+        Bible View renders on a 16:9 surface. A 1280px reference width plus
+        the configured text-box percentage gives a
         stable estimate across output resolutions because both dimensions
         scale together.
         """
 
         try:
-            font_size = int(self.stage_display_settings.get("fontSize", 54))
+            font_size = int(self.bible_display_settings.get("fontSize", 50))
         except (TypeError, ValueError):
-            font_size = 54
+            font_size = 50
         try:
-            width_percent = int(self.stage_display_settings.get("textBoxWidth", 90))
+            width_percent = int(self.bible_display_settings.get("textBoxWidth", 90))
         except (TypeError, ValueError):
             width_percent = 90
         font_size = max(12, min(160, font_size))
@@ -2065,7 +2113,7 @@ class ControlCenterPage(tk.Frame):
             return
         try:
             max_lines = int(
-                self.stage_display_settings.get("bibleMaxLinesPerSlide", 4)
+                self.bible_display_settings.get("maxLinesPerSlide", 4)
             )
         except (TypeError, ValueError):
             max_lines = 4
@@ -2762,6 +2810,49 @@ class ControlCenterPage(tk.Frame):
         widget.see(tk.INSERT)
         return "break"
 
+    def _lyrics_selection_anchor(self, widget: tk.Text) -> str:
+        """Return the fixed edge to use for Shift+Home/End selections."""
+
+        insert = widget.index(tk.INSERT)
+        try:
+            first = widget.index(tk.SEL_FIRST)
+            last = widget.index(tk.SEL_LAST)
+        except tk.TclError:
+            return insert
+        if widget.compare(insert, "==", first):
+            return last
+        if widget.compare(insert, "==", last):
+            return first
+        return insert
+
+    def _lyrics_extend_selection(self, widget: tk.Text, target: str) -> str:
+        anchor = self._lyrics_selection_anchor(widget)
+        target_index = widget.index(target)
+        widget.tag_remove(tk.SEL, "1.0", tk.END)
+        if widget.compare(anchor, "<", target_index):
+            widget.tag_add(tk.SEL, anchor, target_index)
+        elif widget.compare(anchor, ">", target_index):
+            widget.tag_add(tk.SEL, target_index, anchor)
+        widget.mark_set(tk.INSERT, target_index)
+        widget.see(tk.INSERT)
+        return "break"
+
+    def _lyrics_shift_home(self, event=None):
+        """Select from the caret to the start of the visual line."""
+
+        widget = event.widget if event is not None else self.lyrics_editor
+        return self._lyrics_extend_selection(
+            widget, widget.index(f"{tk.INSERT} display linestart")
+        )
+
+    def _lyrics_shift_end(self, event=None):
+        """Select from the caret to the end of the visual line."""
+
+        widget = event.widget if event is not None else self.lyrics_editor
+        return self._lyrics_extend_selection(
+            widget, widget.index(f"{tk.INSERT} display lineend")
+        )
+
     def _mark_editor_dirty(self):
         if self._suppress_editor_events or self.title_entry.cget("state") != "normal":
             return
@@ -3329,6 +3420,9 @@ class ControlCenterPage(tk.Frame):
         self.message_display_settings = self.db.get_display_settings(
             self.church_id(), "message"
         )
+        self.bible_display_settings = self.db.get_display_settings(
+            self.church_id(), "bible"
+        )
         # Keep the hosted viewer aligned even when settings arrived through cloud sync.
         self.controller.publish_stage_view_styles()
         # Retain the existing name for slide generation and the in-app Preview.
@@ -3413,9 +3507,17 @@ class ControlCenterPage(tk.Frame):
 
     def _presentation_cue(self, view_type="live", preview=False):
         is_stage = view_type == "stage"
-        settings = (
-            self.stage_display_settings if is_stage else self.live_display_settings
-        )
+        settings = self.stage_display_settings if is_stage else self.live_display_settings
+        if not is_stage and self.active_content_kind == "bible":
+            # Bible typography/background is independent, while the church
+            # logo remains a global Live View control.
+            settings = {
+                **self.bible_display_settings,
+                **{
+                    key: self.live_display_settings.get(key)
+                    for key in ("logoData", "logoFileName", "logoX", "logoY", "logoWidth")
+                },
+            }
         slide = self.preview_slide if preview else self.live_slide
         title = (
             self._current_content_title()

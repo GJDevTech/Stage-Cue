@@ -102,6 +102,13 @@ DEFAULT_MESSAGE_DISPLAY_SETTINGS: dict[str, Any] = {
     "fontSize": 64,
 }
 
+DEFAULT_BIBLE_DISPLAY_SETTINGS: dict[str, Any] = {
+    **DEFAULT_DISPLAY_SETTINGS,
+    # Bible passages get their own audience-facing style and pagination.
+    "fontSize": 50,
+    "maxLinesPerSlide": 4,
+}
+
 
 def default_display_settings_bundle() -> dict[str, dict[str, Any]]:
     """Return independent per-church settings for every presentation target."""
@@ -110,6 +117,7 @@ def default_display_settings_bundle() -> dict[str, dict[str, Any]]:
         "liveView": dict(DEFAULT_DISPLAY_SETTINGS),
         "stageView": dict(DEFAULT_STAGE_DISPLAY_SETTINGS),
         "messageView": dict(DEFAULT_MESSAGE_DISPLAY_SETTINGS),
+        "bibleView": dict(DEFAULT_BIBLE_DISPLAY_SETTINGS),
     }
 
 
@@ -671,8 +679,10 @@ class DatabaseService:
             return "stageView"
         if normalized in {"message", "messageview", "custommessage"}:
             return "messageView"
+        if normalized in {"bible", "bibleview", "scripture"}:
+            return "bibleView"
         raise ValueError(
-            "Display target must be Live View, Stage View, or Custom Message."
+            "Display target must be Live View, Stage View, Bible View, or Custom Message."
         )
 
     @staticmethod
@@ -717,12 +727,14 @@ class DatabaseService:
         if not isinstance(stored, dict):
             stored = {}
         is_bundle = any(
-            key in stored for key in ("liveView", "stageView", "messageView")
+            key in stored
+            for key in ("liveView", "stageView", "messageView", "bibleView")
         )
         if is_bundle:
             live_source = stored.get("liveView")
             stage_source = stored.get("stageView")
             message_source = stored.get("messageView")
+            bible_source = stored.get("bibleView")
             live_source = live_source if isinstance(live_source, dict) else {}
             stage_source = (
                 stage_source
@@ -735,14 +747,27 @@ class DatabaseService:
                 if isinstance(message_source, dict)
                 else stage_source
             )
+            if not isinstance(bible_source, dict):
+                # Migration for churches created before Bible View had an
+                # independent style: start from Live View, while preserving
+                # the old Stage View Bible pagination value when available.
+                bible_source = dict(live_source)
+                try:
+                    bible_source["maxLinesPerSlide"] = int(
+                        stage_source.get("bibleMaxLinesPerSlide", 4)
+                    )
+                except (TypeError, ValueError):
+                    bible_source["maxLinesPerSlide"] = 4
         else:
             # Older installations stored one flat style. Use it for both views.
             live_source = stored
             stage_source = stored
             message_source = stored if stored else DEFAULT_MESSAGE_DISPLAY_SETTINGS
+            bible_source = dict(stored) if stored else dict(DEFAULT_BIBLE_DISPLAY_SETTINGS)
         live = cls._validate_display_settings(live_source)
         stage = cls._validate_display_settings(stage_source)
         message = cls._validate_display_settings(message_source)
+        bible = cls._validate_display_settings(bible_source)
         fallback_count = 1 if cls._as_boolean(
             stage_source.get("showNextSlide", False)
         ) else 0
@@ -776,6 +801,7 @@ class DatabaseService:
             "liveView": live,
             "stageView": stage,
             "messageView": message,
+            "bibleView": bible,
         }
 
     @staticmethod

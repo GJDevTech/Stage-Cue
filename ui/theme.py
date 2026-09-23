@@ -449,6 +449,10 @@ def apply_to_root(root: tk.Misc) -> None:
         ("*Text.background", PALETTE["editor_bg"]),
         ("*Text.foreground", PALETTE["editor_fg"]),
         ("*Text.insertBackground", PALETTE["primary"]),
+        ("*Text.selectBackground", PALETTE["select_bg"]),
+        ("*Text.selectForeground", PALETTE["select_fg"]),
+        ("*Label.foreground", PALETTE["text"]),
+        ("*Labelframe.foreground", PALETTE["text"]),
         ("*Checkbutton.foreground", PALETTE["text"]),
         ("*Checkbutton.selectColor", PALETTE["input_bg"]),
         ("*Checkbutton.activeBackground", PALETTE["surface"]),
@@ -510,6 +514,17 @@ def apply_to_root(root: tk.Misc) -> None:
     )
     style.configure("TFrame", background=PALETTE["surface"])
     style.configure("TLabel", background=PALETTE["surface"], foreground=PALETTE["text"])
+    style.configure(
+        "TLabelframe",
+        background=PALETTE["surface"],
+        foreground=PALETTE["text"],
+        bordercolor=PALETTE["border"],
+    )
+    style.configure(
+        "TLabelframe.Label",
+        background=PALETTE["surface"],
+        foreground=PALETTE["text"],
+    )
     style.configure(
         "TCheckbutton",
         background=PALETTE["surface"],
